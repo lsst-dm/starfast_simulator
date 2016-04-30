@@ -1,3 +1,25 @@
+#
+# LSST Data Management System
+# Copyright 2016 LSST Corporation.
+#
+# This product includes software developed by the
+# LSST Project (http://www.lsst.org/).
+#
+# This program is free software: you can redistribute it and/or modify
+# it under the terms of the GNU General Public License as published by
+# the Free Software Foundation, either version 3 of the License, or
+# (at your option) any later version.
+#
+# This program is distributed in the hope that it will be useful,
+# but WITHOUT ANY WARRANTY; without even the implied warranty of
+# MERCHANTABILITY or FITNESS FOR A PARTICULAR PURPOSE.  See the
+# GNU General Public License for more details.
+#
+# You should have received a copy of the LSST License Statement and
+# the GNU General Public License along with this program.  If not,
+# see <http://www.lsstcorp.org/LegalNotices/>.
+#
+
 """Persist python arrays as fits files readable as Eimages."""
 
 import numpy as np
@@ -27,16 +49,17 @@ class PersistArray:
         self.zenith = zenith_angle
         self.azimuth = azimuth_angle
         self.obsid = obsid
-        self.x_size = lsst_ccd_xsize
-        self.y_size = lsst_ccd_ysize
-
         self.array = array
+        self.y_size, self.x_size = array.shape
 
         self._make_header()
+        self.filename = "lsst_e_%i_f2_R22_S11_E000.fits" % obsid
 
     def _make_header(self):
         fitsHeader = pyfits.Header()
-        fitsHeader.set("SENSOR", 11)
+        fitsHeader.set("CHIPID", "R22_S11")
+        # Required! Phosim output stores the snap ID in "OUTFILE" as the last three characters in a string.
+        fitsHeader.set("OUTFILE", "SnapId_000")
         fitsHeader.set("RADESYS", "ICRS")
         fitsHeader.set("EQUINOX", self.epoch)
         fitsHeader.set("CRVAL1", self.ra)
@@ -66,22 +89,25 @@ class PersistArray:
 
         self.fitsHeader = fitsHeader
 
-    def write(self, filename, **kwargs):
+    def write(self, directory, clobber=True, add_noise=None, **kwargs):
         """Write the fits file."""
-        array = self._fill_image(**kwargs)
+        # array = self._fill_image(**kwargs)
+        array = self.array
+        if add_noise is not None:
+            array += np.abs(np.random.normal(scale=add_noise, size=array.shape))
         hdu = pyfits.PrimaryHDU(array, header=self.fitsHeader)
-        hdu.writeto(filename)
+        hdu.writeto(directory + self.filename, clobber=clobber)
 
-    def _fill_image(self, x0=None, y0=None, add_noise=None):
+    def _fill_image(self, x0=None, y0=None):
         y_size_img, x_size_img = self.array.shape
         if x0 is None:
-            x0 = (self.x_size - x_size_img) // 2
+            x0 = (lsst_ccd_xsize - self.x_size) // 2
         if y0 is None:
-            y0 = (self.y_size - y_size_img) // 2
+            y0 = (lsst_ccd_ysize - self.y_size) // 2
         x1 = int(x0 + x_size_img)
         y1 = int(y0 + y_size_img)
         array_fill = np.zeros((self.y_size, self.x_size))
         array_fill[y0:y1, x0:x1] = self.array
-        if add_noise is not None:
-            array_fill += np.abs(np.random.normal(scale=add_noise, size=array_fill.shape))
+        self.array = array_fill
+        
         return(array_fill)
