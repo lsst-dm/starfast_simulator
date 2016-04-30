@@ -25,7 +25,10 @@ import numpy as np
 from numpy.fft import rfft2, irfft2, fftshift
 from scipy import constants
 import lsst.afw.geom as afwGeom
+import lsst.afw.image as afwImage
+import lsst.afw.coord as afwCoord
 import lsst.afw.table as afwTable
+import lsst.pex.policy as pexPolicy
 from lsst.sims.photUtils import Bandpass, matchStar
 from lsst.utils import getPackageDir
 from calc_refractive_index import diff_refraction
@@ -34,16 +37,21 @@ import time
 import unittest
 import lsst.utils.tests as utilsTests
 
+lsst_lat = -30.244639
+lsst_lon = -70.749417
+
 
 class StarSim:
     """Class that defines a random simulated region of sky, and allows fast transformations."""
 
     def __init__(self, psf=None, pixel_scale=0.25, pad_image=1.5, catalog=None, sed_list=None,
-                 x_size=512, y_size=512, band_name='g', photons_per_adu=1e4, **kwargs):
+                 x_size=512, y_size=512, band_name='g', photons_per_adu=1e4, obsid=100,
+                 ra=lsst_lon, dec=lsst_lat, sky_rotation=0.0, **kwargs):
         """Set up the fixed parameters of the simulation."""
         bandpass = _load_bandpass(band_name=band_name, **kwargs)
         self.n_step = int(np.ceil((bandpass.wavelen_max - bandpass.wavelen_min) / bandpass.wavelen_step))
         self.bandpass = bandpass
+        self.band_name = band_name
         if sed_list is None:
             # Load in model SEDs
             matchStarObj = matchStar()
@@ -51,6 +59,8 @@ class StarSim:
         self.sed_list = sed_list
         self.catalog = catalog
         self.coord = _CoordsXY(pixel_scale=pixel_scale, pad_image=pad_image, x_size=x_size, y_size=y_size)
+        self.bbox = afwGeom.Box2I(afwGeom.Point2I(0, 0), afwGeom.ExtentI(x_size, y_size))
+        self._create_wcs(ra=ra, dec=dec, sky_rotation=sky_rotation)
         self.edge_dist = None
         self.kernel_radius = None
         if psf is not None:
@@ -58,6 +68,7 @@ class StarSim:
         self.source_model = None
         self.bright_model = None
         self.n_star = None
+        self.obsid = obsid  # observation number used when persisting images
         self.photons_per_adu = photons_per_adu  # used to approximate the effect of photon shot noise.
 
     def load_psf(self, psf, edge_dist=None, kernel_radius=None, **kwargs):
@@ -74,17 +85,18 @@ class StarSim:
             else:
                 self.edge_dist = 5 * psf.getFWHM() * fwhm_to_sigma / CoordsXY.scale()
 
-    def load_catalog(self, name=None, sed_list=None, n_star=None, **kwargs):
+    def load_catalog(self, name=None, sed_list=None, n_star=None, seed=None, **kwargs):
         """Load or generate a catalog of stars to be used for the simulations."""
         bright_sigma_threshold = 3.0
         bright_flux_threshold = 0.1
         CoordsXY = self.coord
         self.catalog = _cat_sim(x_size=CoordsXY.xsize(base=True), y_size=CoordsXY.ysize(base=True),
                                 name=name, n_star=n_star, pixel_scale=CoordsXY.pixel_scale,
-                                edge_distance=self.edge_dist, **kwargs)
+                                edge_distance=self.edge_dist, seed=seed, **kwargs)
         schema = self.catalog.getSchema()
         n_star = len(self.catalog)
         self.n_star = n_star
+        self.seed = seed
         if sed_list is None:
             sed_list = self.sed_list
 
@@ -163,17 +175,20 @@ class StarSim:
             if verbose:
                 print(_timing_report(n_star=n_bright, bright=True, timing=timing_model))
 
-    def convolve(self, seed=None, sky_noise=0, instrument_noise=0, photon_noise=0, verbose=True, **kwargs):
+    def convolve(self, seed=None, sky_noise=0, instrument_noise=0, photon_noise=0, verbose=True,
+                 elevation=None, azimuth=None, **kwargs):
         """Convolve a simulated sky with a given PSF."""
         CoordsXY = self.coord
         sky_noise_gen = _sky_noise_gen(CoordsXY, seed=seed, amplitude=sky_noise,
                                        n_step=self.n_step, verbose=verbose)
         if self.source_model is not None:
-            source_image = self._convolve_subroutine(sky_noise_gen, verbose=verbose, bright=False, **kwargs)
+            source_image = self._convolve_subroutine(sky_noise_gen, verbose=verbose, bright=False,
+                                                     elevation=elevation, azimuth=azimuth, **kwargs)
         else:
             source_image = 0.0
         if self.bright_model is not None:
-            bright_image = self._convolve_subroutine(sky_noise_gen, verbose=verbose, bright=True, **kwargs)
+            bright_image = self._convolve_subroutine(sky_noise_gen, verbose=verbose, bright=True,
+                                                     elevation=elevation, azimuth=azimuth, **kwargs)
         else:
             bright_image = 0.0
         return_image = source_image + bright_image
@@ -190,15 +205,18 @@ class StarSim:
             if seed is not None:
                 rand_gen.seed(seed - 1.1)
             return_image += rand_gen.normal(scale=instrument_noise, size=return_image.shape)
-        return(return_image)
+        exposure = self._create_exposure(return_image, elevation=elevation, azimuth=azimuth)
+        return(exposure)
 
-    def _convolve_subroutine(self, sky_noise_gen, psf=None, verbose=True, bright=False, **kwargs):
+    def _convolve_subroutine(self, sky_noise_gen, psf=None, verbose=True, bright=False,
+                             elevation=None, azimuth=None, **kwargs):
         CoordsXY = self.coord
         if bright:
             CoordsXY.set_oversample(2)
         else:
             CoordsXY.set_oversample(1)
-        dcr_gen = _dcr_generator(self.bandpass, pixel_scale=CoordsXY.scale(), **kwargs)
+        dcr_gen = _dcr_generator(self.bandpass, pixel_scale=CoordsXY.scale(),
+                                 elevation=None, azimuth=None, **kwargs)
         convol = np.zeros((CoordsXY.ysize(), CoordsXY.xsize() // 2 + 1), dtype='complex64')
         if psf is None:
             psf = self.psf
@@ -231,6 +249,57 @@ class StarSim:
         if bright:
             CoordsXY.set_oversample(1)
         return(return_image)
+
+    def _create_wcs(self, ra=None, dec=None, sky_rotation=None):
+        """Create a wcs (coordinate system)."""
+        CoordsXY = self.coord
+        crval = afwCoord.IcrsCoord(ra * afwGeom.degrees, dec * afwGeom.degrees)
+        crpix = afwGeom.Box2D(self.bbox).getCenter()
+        cd1_1 = (CoordsXY.scale() * afwGeom.arcseconds * np.cos(np.radians(sky_rotation))).asDegrees()
+        cd1_2 = (-CoordsXY.scale() * afwGeom.arcseconds * np.sin(np.radians(sky_rotation))).asDegrees()
+        cd2_1 = (CoordsXY.scale() * afwGeom.arcseconds * np.sin(np.radians(sky_rotation))).asDegrees()
+        cd2_2 = (CoordsXY.scale() * afwGeom.arcseconds * np.cos(np.radians(sky_rotation))).asDegrees()
+        self.wcs = afwImage.makeWcs(crval, crpix, cd1_1, cd1_2, cd2_1, cd2_2)
+
+    def _create_exposure(self, array, exposure_time=30, elevation=None, azimuth=None):
+        """Convert a numpy array to an LSST exposure."""
+        exposure = afwImage.ExposureF(self.bbox)
+        exposure.setWcs(self.wcs)
+        # We need the filter name in the exposure metadata, and it can't just be set directly
+        try:
+            exposure.setFilter(afwImage.Filter(self.band_name))
+        except:
+            filterPolicy = pexPolicy.Policy()
+            filterPolicy.add("lambdaEff", self.bandpass.calc_eff_wavelen())
+            afwImage.Filter.define(afwImage.FilterProperty(self.band_name, filterPolicy))
+            exposure.setFilter(afwImage.Filter(self.band_name))
+        calib = afwImage.Calib()
+        calib.setExptime(exposure_time)
+        exposure.setCalib(calib)
+        exposure.getMaskedImage().getImage().getArray()[:, :] = array
+
+        hour_angle = (90.0 - elevation) * np.cos(np.radians(azimuth)) / 15.0
+        mjd = 59000.0 + (lsst_lat / 15.0 - hour_angle) / 24.0
+        meta = exposure.getMetadata()
+        meta.add("CHIPID", "R22_S11")
+        # Required! Phosim output stores the snap ID in "OUTFILE" as the last three characters in a string.
+        meta.add("OUTFILE", "SnapId_000")
+
+        meta.add("TAI", mjd)
+        meta.add("MJD-OBS", mjd)
+
+        meta.add("EXTTYPE", "IMAGE")
+        meta.add("EXPTIME", 30.0)
+        meta.add("AIRMASS", 1.0 / np.sin(np.radians(elevation)))
+        meta.add("ZENITH", 90 - elevation)
+        meta.add("AZIMUTH", azimuth)
+        # meta.add("FILTER", self.band_name)
+        if self.seed is not None:
+            meta.add("SEED", self.seed)
+        if self.obsid is not None:
+            meta.add("OBSID", self.obsid)
+            self.obsid += 1
+        return(exposure)
 
 
 def _sky_noise_gen(CoordsXY, seed=None, amplitude=None, n_step=1, verbose=False):
