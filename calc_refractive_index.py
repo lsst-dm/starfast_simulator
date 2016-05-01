@@ -1,18 +1,39 @@
+#
+# LSST Data Management System
+# Copyright 2016 LSST Corporation.
+#
+# This product includes software developed by the
+# LSST Project (http://www.lsst.org/).
+#
+# This program is free software: you can redistribute it and/or modify
+# it under the terms of the GNU General Public License as published by
+# the Free Software Foundation, either version 3 of the License, or
+# (at your option) any later version.
+#
+# This program is distributed in the hope that it will be useful,
+# but WITHOUT ANY WARRANTY; without even the implied warranty of
+# MERCHANTABILITY or FITNESS FOR A PARTICULAR PURPOSE.  See the
+# GNU General Public License for more details.
+#
+# You should have received a copy of the LSST License Statement and
+# the GNU General Public License along with this program.  If not,
+# see <http://www.lsstcorp.org/LegalNotices/>.
+#
+"""Calculate atmospheric refraction under different observing conditions."""
 from __future__ import print_function, division, absolute_import
 import numpy as np
 
 
 def refraction(wavelength, zenith_angle, atmospheric_pressure, temperature, humidity=10,
                latitude=-30.244639, altitude=2663.):
-    """Calculate overall refraction under atmospherica and observing conditions.
-    input pressure is in atmospheres
-    wavelength and zenith_angle may be supplied as numpy vectors
-    wavelength is in nm (valid for 230.2 < wavelength < 2058.6)
-    temperature is in Celcius (valid for -20 < T < 50)
-    humidity is in percent (0-100)
-    zenith angle is in degrees. Equations are valid for zenith_angle < 75
-    latitude is in degrees
-    altitude is in meters
+    """Calculate overall refraction under atmospheric and observing conditions.
+    @param wavelength: wavelength is in nm (valid for 230.2 < wavelength < 2058.6), may be an array
+    @param zenith_angle: zenith angle in degrees, may be an array
+    @param atmospheric_pressure: pressure is in atmospheres
+    @param temperature: site temperature in Celcius (valid for -20 < T < 50)
+    @param humidity: site humidity, in percent (0-100)
+    @param latitude: site latidude in decimal degrees
+    @param altitude: site altitude in meters
     """
     temperature_Kelvin = temperature + 273.15
     water_vapor_pressure = humidity_to_pressure(humidity=humidity, temperature=temperature)
