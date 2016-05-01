@@ -1,3 +1,24 @@
+#
+# LSST Data Management System
+# Copyright 2016 LSST Corporation.
+#
+# This product includes software developed by the
+# LSST Project (http://www.lsst.org/).
+#
+# This program is free software: you can redistribute it and/or modify
+# it under the terms of the GNU General Public License as published by
+# the Free Software Foundation, either version 3 of the License, or
+# (at your option) any later version.
+#
+# This program is distributed in the hope that it will be useful,
+# but WITHOUT ANY WARRANTY; without even the implied warranty of
+# MERCHANTABILITY or FITNESS FOR A PARTICULAR PURPOSE.  See the
+# GNU General Public License for more details.
+#
+# You should have received a copy of the LSST License Statement and
+# the GNU General Public License along with this program.  If not,
+# see <http://www.lsstcorp.org/LegalNotices/>.
+#
 """
 StarFast is a simple but fast simulation tool to generate images for testing algorithms.
 It is optimized for creating many realizations of the same field of sky under different observing conditions.
@@ -21,6 +42,7 @@ atmospheric, etc... effects. If desired, a different psf may be supplied for eac
     observed_image = example_sim.convolve(psf=psf, options=options)
 """
 from __future__ import print_function, division, absolute_import
+from collections import OrderedDict
 import numpy as np
 from numpy.fft import rfft2, irfft2, fftshift
 from scipy import constants
@@ -42,12 +64,28 @@ lsst_lon = -70.749417
 
 
 class StarSim:
-    """Class that defines a random simulated region of sky, and allows fast transformations."""
+    """!Class that defines a random simulated region of sky, and allows fast transformations."""
 
     def __init__(self, psf=None, pixel_scale=0.25, pad_image=1.5, catalog=None, sed_list=None,
                  x_size=512, y_size=512, band_name='g', photons_per_adu=1e4, obsid=100,
                  ra=lsst_lon, dec=lsst_lat, sky_rotation=0.0, **kwargs):
-        """Set up the fixed parameters of the simulation."""
+        """
+        Set up the fixed parameters of the simulation.
+        @param psf: psf object from Galsim. Needs to have methods getFWHM() and drawImage().
+        @param pixel_scale: arcsec/pixel to use for final images.
+        @param pad_image: Image size padding factor, to reduce FFT aliasing. Set to 1.0 to tile images.
+        @param catalog: Supply a catalog from a previous StarSim run. Untested!
+        @param sed_list: Supply a list of SEDs from a call to lsst.sims.photUtils matchStar.
+                         If None, a simple blackbody radiation spectrum will be used for each source.
+        @param x_size: Number of pixels on the x-axis
+        @param y_size: Number of pixels on the y-axis
+        @param band_name: Common name of the filter used. For LSST, use u, g, r, i, z, or y
+        @param photons_per_adu: Conversion factor between 'counts' and photons
+        @param obsid: unique identificatin number for different runs of the same simulation.
+        @param ra: Right Ascension of the center of the simulation. Used only for the wcs of output fits files
+        @param dec: Declination of the center of the simulation. Used only for the wcs of output fits files.
+        @param sky_rotation: Rotation of the wcs, in degrees.
+        """
         bandpass = _load_bandpass(band_name=band_name, **kwargs)
         self.n_step = int(np.ceil((bandpass.wavelen_max - bandpass.wavelen_min) / bandpass.wavelen_step))
         self.bandpass = bandpass
@@ -71,12 +109,18 @@ class StarSim:
         self.obsid = obsid  # observation number used when persisting images
         self.photons_per_adu = photons_per_adu  # used to approximate the effect of photon shot noise.
 
-    def load_psf(self, psf, edge_dist=None, kernel_radius=None, **kwargs):
-        """Load a PSF class from galsim. The class needs to have two methods, getFWHM() and drawImage()."""
+    def load_psf(self, psf, edge_dist=None, _kernel_radius=None, **kwargs):
+        """
+        !Load a PSF class from galsim. The class needs to have two methods, getFWHM() and drawImage().
+        @param edge_dist: Number of pixels from the edge of the image to exclude sources. May be negative.
+        @param kernel_radius: radius in pixels to use when gridding sources in fast_dft.py.
+                              Best to be calculated from psf, unless you know what you are doing!
+        """
         fwhm_to_sigma = 1.0 / (2.0 * np.sqrt(2. * np.log(2)))
         self.psf = psf
         CoordsXY = self.coord
         kernel_min_radius = np.ceil(5 * psf.getFWHM() * fwhm_to_sigma / CoordsXY.scale())
+        self.kernel_radius = _kernel_radius
         if self.kernel_radius < kernel_min_radius:
             self.kernel_radius = kernel_min_radius
         if self.edge_dist is None:
@@ -86,9 +130,15 @@ class StarSim:
                 self.edge_dist = 5 * psf.getFWHM() * fwhm_to_sigma / CoordsXY.scale()
 
     def load_catalog(self, name=None, sed_list=None, n_star=None, seed=None, **kwargs):
-        """Load or generate a catalog of stars to be used for the simulations."""
-        bright_sigma_threshold = 3.0
-        bright_flux_threshold = 0.1
+        """
+        Load or generate a catalog of stars to be used for the simulations.
+        @param name: name of flux entry to use for catalg. Only important for external use of the catalog.
+        @param n_star: number of stars to include in the simulated catalog.
+        @param seed: random number generator seed value. Allows simulations to be recreated.
+        """
+        bright_sigma_threshold = 3.0  # Stars with flux this many sigma over the mean are 'bright'
+        bright_flux_threshold = 0.1  # To be 'bright' a star's flux must exceed
+        #                              this fraction of the flux of all faint stars
         CoordsXY = self.coord
         self.catalog = _cat_sim(x_size=CoordsXY.xsize(base=True), y_size=CoordsXY.ysize(base=True),
                                 name=name, n_star=n_star, pixel_scale=CoordsXY.pixel_scale,
@@ -177,7 +227,7 @@ class StarSim:
 
     def convolve(self, seed=None, sky_noise=0, instrument_noise=0, photon_noise=0, verbose=True,
                  elevation=None, azimuth=None, **kwargs):
-        """Convolve a simulated sky with a given PSF."""
+        """Convolve a simulated sky with a given PSF. Returns an LSST exposure."""
         CoordsXY = self.coord
         sky_noise_gen = _sky_noise_gen(CoordsXY, seed=seed, amplitude=sky_noise,
                                        n_step=self.n_step, verbose=verbose)
@@ -216,7 +266,7 @@ class StarSim:
         else:
             CoordsXY.set_oversample(1)
         dcr_gen = _dcr_generator(self.bandpass, pixel_scale=CoordsXY.scale(),
-                                 elevation=None, azimuth=None, **kwargs)
+                                 elevation=elevation, azimuth=azimuth, **kwargs)
         convol = np.zeros((CoordsXY.ysize(), CoordsXY.xsize() // 2 + 1), dtype='complex64')
         if psf is None:
             psf = self.psf
@@ -303,7 +353,12 @@ class StarSim:
 
 
 def _sky_noise_gen(CoordsXY, seed=None, amplitude=None, n_step=1, verbose=False):
-    """Generate random sky noise in Fourier space."""
+    """
+    Generate random sky noise in Fourier space.
+    @param seed: Random number generator seed value. If None, the current system time will be used.
+    @param amplitude: Scale factor of random sky noise, in Jy. If None or <=0, no noise is added.
+    @param n_step: Number of sub-band planes used for the simulation. Supplied internally, for normalization.
+    """
     if amplitude > 0:
         if verbose:
             print("Adding sky noise with amplitude %f" % amplitude)
@@ -400,12 +455,15 @@ def _timing_report(n_star=None, bright=False, timing=None):
                % (n_star, bright_star, timing, timing / n_star))
 
 
-def _dcr_generator(bandpass, pixel_scale=None, elevation=None, azimuth=None, **kwargs):
-    """!Call the functions that compute Differential Chromatic Refraction (relative to mid-band)."""
-    if elevation is None:
-        elevation = 50.0
-    if azimuth is None:
-        azimuth = 0.0
+def _dcr_generator(bandpass, pixel_scale=None, elevation=50.0, azimuth=0.0, **kwargs):
+    """
+    !Call the functions that compute Differential Chromatic Refraction (relative to mid-band).
+    @param bandpass: bandpass object created with load_bandpass
+    @param pixel_scale: plate scale in arcsec/pixel
+    @param elevation: elevation angle of the center of the image, in decimal degrees.
+    @param azimuth: azimuth angle of the observation, in decimal degrees.
+    """
+
     zenith_angle = 90.0 - elevation
     wavelength_midpoint = bandpass.calc_eff_wavelen()
     for wavelength in _wavelength_iterator(bandpass, use_midpoint=True):
@@ -479,6 +537,17 @@ def _star_gen(sed_list=None, seed=None, temperature=5600, metallicity=0.0, surfa
         Either use a supplied list of SEDs to be drawn from, or use a blackbody radiation model.
         The output is normalized to sum to the given flux.
         [future] If a seed is supplied, noise can be added to the final spectrum before normalization.
+
+        @param sed_list: Supply a list of SEDs from a call to lsst.sims.photUtils matchStar.
+                         If None, a simple blackbody radiation spectrum will be used for each source.
+        @param seed: Not yet implemented!
+        @param temperature: surface temperature of the star in degrees Kelvin.
+        @param metallicity: logarithmic metallicity of the star, relative to solar.
+        @param surface_gravity: surface gravity of the star, relative to solar
+        @param flux: Total broadband flux of the star, in W/m^2
+        @param bandpass: bandpass object created with load_bandpass
+
+        @return Returns an array of flux values (one entry per sub-band of the simulation)
     """
     flux_to_jansky = 1.0e26
     f0 = constants.speed_of_light / (bandpass.wavelen_min * 1.0e-9)
@@ -510,12 +579,12 @@ def _star_gen(sed_list=None, seed=None, temperature=5600, metallicity=0.0, surfa
         t_inds = t_inds[0]  # unpack tuple from np.where()
         n_inds = len(t_inds)
         if n_inds > 1:
-            grav_list = [sed_list[_i].logg for _i in t_inds]
-            metal_list = [sed_list[_i].logZ for _i in t_inds]
+            grav_list = np.array([sed_list[_i].logg for _i in t_inds])
+            metal_list = np.array([sed_list[_i].logZ for _i in t_inds])
             offset = 10.0  # Add an offset to the values to prevent dividing by zero
-            grav_weight = (((grav + offset) / (surface_gravity + offset) - 1.0)**2 for grav in grav_list)
-            metal_weight = (((metal + offset) / (metallicity + offset) - 1.0)**2 for metal in metal_list)
-            composite_weight = [grav + metal for (grav, metal) in zip(grav_weight, metal_weight)]
+            grav_weight = ((grav_list + offset) / (surface_gravity + offset) - 1.0)**2.0
+            metal_weight = ((metal_list + offset) / (metallicity + offset) - 1.0)**2.0
+            composite_weight = grav_weight + metal_weight
             sed_i = t_inds[np.argmin(composite_weight)]
         else:
             sed_i = t_inds[0]
@@ -583,7 +652,15 @@ def _star_gen(sed_list=None, seed=None, temperature=5600, metallicity=0.0, surfa
 
 def _load_bandpass(band_name='g', wavelength_step=None, use_mirror=True, use_lens=True, use_atmos=True,
                    use_filter=True, use_detector=True, **kwargs):
-    """!Load in Bandpass object from sims_photUtils."""
+    """
+    !Load in Bandpass object from sims_photUtils.
+    @param band_name: Common name of the filter used. For LSST, use u, g, r, i, z, or y
+    @param wavelength_step: Wavelength resolution, also the wavelength range of each sub-band plane
+    @param use_mirror: Flag, include mirror in filter throughput calculation?
+    @param use_lens: Flag, use LSST lens in filter throughput calculation?
+    @param use_atmos: Flag, use standard atmosphere transmission in filter throughput calculation?
+    @param use_filter: Flag, use LSST filters in filter throughput calculation?
+    """
     class BandpassMod(Bandpass):
         """Customize a few methods of the Bandpass class from sims_photUtils."""
 
@@ -601,7 +678,10 @@ def _load_bandpass(band_name='g', wavelength_step=None, use_mirror=True, use_len
             effwavelenphi = (self.wavelen[w_inds] * self.phi[w_inds]).sum() / self.phi[w_inds].sum()
             return effwavelenphi
 
-    """Define the wavelength range and resolution for a given ugrizy band."""
+    """
+    Define the wavelength range and resolution for a given ugrizy band.
+    These are defined in case the LSST filter throughputs are not used.
+    """
     band_dict = {'u': (324.0, 395.0), 'g': (405.0, 552.0), 'r': (552.0, 691.0),
                  'i': (818.0, 921.0), 'z': (922.0, 997.0), 'y': (975.0, 1075.0)}
     band_range = band_dict[band_name]
@@ -645,6 +725,71 @@ def _wavelength_iterator(bandpass, use_midpoint=False):
         wave_start = wave_end
 
 
+class StarCatalog:
+    """A container defining the property ranges of all types of stellar objects used in a simulation."""
+
+    def __init__(self, hottest_star='A', coolest_star='M'):
+        """Define the ranges for each type of star."""
+        self.star_types = {'M': 0, 'K': 1, 'G': 2, 'F': 3, 'A': 4, 'B': 5, 'O': 6}
+        hot_val = self.star_types[hottest_star]
+        cool_val = self.star_types[coolest_star]
+        # relative abundance.
+        self.abundance = OrderedDict([('M', 76.45), ('K', 12.1), ('G', 7.6), ('F', 3.0),
+                                      ('A', 0.6), ('B', 0.13), ('O', 3e-05)])
+        for key, val in self.star_types.items():
+            if val < cool_val:
+                self.abundance[key] = 0.0
+            if val > hot_val:
+                self.abundance[key] = 0.0
+
+        # Intrinsic luminosity, relative to solar.
+        self.luminosity = {'M': (0.01, 0.08), 'K': (0.08, 0.6), 'G': (0.6, 1.5), 'F': (1.5, 5.0),
+                           'A': (5.0, 100.0), 'B': (100.0, 30000.0), 'O': (30000.0, 50000.0)}
+        # Surface temperature, in degrees Kelvin.
+        self.temperature = {'M': (2400, 3700), 'K': (3700, 5200), 'G': (5200, 6000), 'F': (6000, 7500),
+                            'A': (7500, 10000), 'B': (10000, 30000), 'O': (30000, 50000)}
+        # (Log) metallicity, relative to solar.
+        self.metallicity = {'M': (-3.0, 0.5), 'K': (-3.0, 0.5), 'G': (-3.0, 0.5), 'F': (-3.0, 0.5),
+                            'A': (-3.0, 0.5), 'B': (-3.0, 0.5), 'O': (-3.0, 0.5)}
+        # Surface gravity, relative to solar.
+        self.gravity = {'M': (0.0, 0.5), 'K': (0.0, 1.0), 'G': (0.0, 1.5), 'F': (0.5, 2.0),
+                        'A': (1.0, 2.5), 'B': (2.0, 4.0), 'O': (3.0, 5.0)}
+
+    def distribution(self, n_star, rand_gen=np.random):
+        """Generate a random distribution of stars."""
+        max_prob = np.sum(self.abundance.values())
+        star_sort = rand_gen.uniform(0.0, max_prob, n_star)
+        star_sort.sort()
+        star_prob = np.cumsum(self.abundance.values())
+        distribution = OrderedDict()
+        ind = 0
+        for _i, star in enumerate(self.abundance):
+            n_use = len([x for x in star_sort[ind:] if x > 0 and x < star_prob[_i]])
+            distribution[star] = n_use
+            ind += n_use
+        return(distribution)
+
+    def get_luminosity(self, star_type, rand_gen=np.random):
+        """Return a random luminosity (rel. solar) in the defined range for the stellar type."""
+        param_range = self.luminosity[star_type]
+        return(rand_gen.uniform(param_range[0], param_range[1]))
+
+    def get_temperature(self, star_type, rand_gen=np.random):
+        """Return a random temperature in the defined range for the stellar type."""
+        param_range = self.temperature[star_type]
+        return(rand_gen.uniform(param_range[0], param_range[1]))
+
+    def get_metallicity(self, star_type, rand_gen=np.random):
+        """Return a random metallicity (log rel. solar) in the defined range for the stellar type."""
+        param_range = self.metallicity[star_type]
+        return(rand_gen.uniform(param_range[0], param_range[1]))
+
+    def get_gravity(self, star_type, rand_gen=np.random):
+        """Return a random surface gravity (rel. solar) in the defined range for the stellar type."""
+        param_range = self.gravity[star_type]
+        return(rand_gen.uniform(param_range[0], param_range[1]))
+
+
 def _stellar_distribution(seed=None, n_star=None, hottest_star='A', coolest_star='M',
                           x_size=None, y_size=None, pixel_scale=None, verbose=True, **kwargs):
     """!Function that attempts to return a realistic distribution of stellar properties.
@@ -654,58 +799,35 @@ def _stellar_distribution(seed=None, n_star=None, hottest_star='A', coolest_star
     metallicity is logarithmic metallicity relative to solar
     surface gravity relative to solar
     """
-    # Percent abundance of stellar types M,K,G,F,A,B,O 
-    star_prob = [76.45, 12.1, 7.6, 3, 0.6, 0.13, 3E-5]
-    # Relative to Solar luminosity. Hotter stars are brighter on average.
-    luminosity_scale = [(0.01, 0.08), (0.08, 0.6), (0.6, 1.5), (1.5, 5.0), (5.0, 100.0), (100.0, 30000.0),
-                        (30000.0, 50000.0)]
-    temperature_range = [(2400, 3700), (3700, 5200), (5200, 6000), (6000, 7500), (7500, 10000),
-                         (10000, 30000), (30000, 50000)]  # in degrees Kelvin
-    metallicity_range = [(-3.0, 0.5)] * len(star_prob)  # Assign a random log metallicity to each star.
-    surface_gravity_range = [(0.0, 0.5), (0.0, 1.0), (0.0, 1.5), (0.5, 2.0),
-                             (1.0, 2.5), (2.0, 4.0), (3.0, 5.0)]
     lum_solar = 3.846e26  # Solar luminosity, in Watts
     ly = 9.4607e15  # one light year, in meters
     pi = np.pi
     pixel_scale_degrees = pixel_scale / 3600.0
     max_star_dist = 1000  # light years
     luminosity_to_flux = lum_solar / (4.0 * pi * ly**2.0)
-    star_type = {'M': 0, 'K': 1, 'G': 2, 'F': 3, 'A': 4, 'B': 5, 'O': 6}
-    star_names = sorted(star_type.keys(), key=lambda star: star_type[star])
-    s_hot = star_type[hottest_star] + 1
-    s_cool = star_type[coolest_star]
-    n_star_type = s_hot - s_cool
-    star_prob = star_prob[s_cool:s_hot]
-    star_prob.insert(0, 0)
-    luminosity_scale = luminosity_scale[s_cool:s_hot]
-    temperature_range = temperature_range[s_cool:s_hot]
-    metallicity_range = metallicity_range[s_cool:s_hot]
-    surface_gravity_range = surface_gravity_range[s_cool:s_hot]
-    star_prob = np.cumsum(star_prob)
-    max_prob = np.max(star_prob)
     rand_gen = np.random
     if seed is not None:
         rand_gen.seed(seed)
-    star_sort = rand_gen.uniform(0, max_prob, n_star)
+
+    StarCat = StarCatalog(hottest_star=hottest_star, coolest_star=coolest_star)
     temperature = []
     flux = []
     metallicity = []
     surface_gravity = []
-    n_star = []
     flux_star = []
     x_star = []
     y_star = []
     z_star = []
     x_scale = np.sin(np.radians(x_size * pixel_scale_degrees)) / 2
     y_scale = np.sin(np.radians(y_size * pixel_scale_degrees)) / 2
-    for _i in range(n_star_type):
-        inds = np.where((star_sort < star_prob[_i + 1]) * (star_sort > star_prob[_i]))
-        inds = inds[0]  # np.where returns a tuple of two arrays
-        n_star.append(len(inds))
+
+    star_dist = StarCat.distribution(n_star, rand_gen=rand_gen)
+    for star_type in star_dist:
+        n_star_type = star_dist[star_type]
         flux_stars_total = 0.0
-        for ind in inds:
-            temp_use = rand_gen.uniform(temperature_range[_i][0], temperature_range[_i][1])
-            lum_use = rand_gen.uniform(luminosity_scale[_i][0], luminosity_scale[_i][1])
+        for _i in range(n_star_type):
+            temp_use = StarCat.get_temperature(star_type, rand_gen=rand_gen)
+            lum_use = StarCat.get_luminosity(star_type, rand_gen=rand_gen)
             bounds_test = True
             while bounds_test:
                 x_dist = rand_gen.uniform(-max_star_dist * x_scale, max_star_dist * x_scale)
@@ -719,8 +841,8 @@ def _stellar_distribution(seed=None, n_star=None, hottest_star='A', coolest_star
             z_star.append(z_dist)
             distance_attenuation = z_dist ** 2.0
             flux_use = lum_use * luminosity_to_flux / distance_attenuation
-            metal_use = rand_gen.uniform(metallicity_range[_i][0], metallicity_range[_i][1])
-            grav_use = rand_gen.uniform(surface_gravity_range[_i][0], surface_gravity_range[_i][1])
+            metal_use = StarCat.get_metallicity(star_type, rand_gen=rand_gen)
+            grav_use = StarCat.get_gravity(star_type, rand_gen=rand_gen)
             temperature.append(temp_use)
             flux.append(flux_use)
             metallicity.append(metal_use)
@@ -730,8 +852,8 @@ def _stellar_distribution(seed=None, n_star=None, hottest_star='A', coolest_star
     flux_total = np.sum(flux_star)
     flux_star = [100. * _f / flux_total for _f in flux_star]
     info_string = "Number and flux contribution of stars of each type:\n"
-    for _i in range(n_star_type):
-        info_string += str(" [%s %i| %0.2f%%]" % (star_names[_i + s_cool], n_star[_i], flux_star[_i]))
+    for _i, star_type in enumerate(star_dist):
+        info_string += str(" [%s %i| %0.2f%%]" % (star_type, star_dist[star_type], flux_star[_i]))
     if verbose:
         print(info_string)
     return((temperature, flux, metallicity, surface_gravity, x_star, y_star))
