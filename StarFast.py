@@ -498,10 +498,10 @@ def _cat_sim(x_size=None, y_size=None, seed=None, n_star=None, n_galaxy=None,
     schema.addField("dust", type="D")
     schema.getAliasMap().set('slot_Centroid', name + '_Centroid')
 
-    x_size_gen = x_size - 2 * edge_distance
-    y_size_gen = y_size - 2 * edge_distance
+    x_size_cat = x_size - 2 * edge_distance
+    y_size_cat = y_size - 2 * edge_distance
     star_properties = _stellar_distribution(seed=seed, n_star=n_star, pixel_scale=pixel_scale,
-                                            x_size=x_size_gen, y_size=y_size_gen, **kwargs)
+                                            x_size=x_size_cat, y_size=y_size_cat, **kwargs)
     temperature = star_properties[0]
     flux = star_properties[1]
     metallicity = star_properties[2]
@@ -769,25 +769,33 @@ class StarCatalog:
             ind += n_use
         return(distribution)
 
-    def get_luminosity(self, star_type, rand_gen=np.random):
+    def gen_luminosity(self, star_type, rand_gen=np.random, n_star=None):
         """Return a random luminosity (rel. solar) in the defined range for the stellar type."""
         param_range = self.luminosity[star_type]
-        return(rand_gen.uniform(param_range[0], param_range[1]))
+        param_vals = rand_gen.uniform(param_range[0], param_range[1], size=n_star)
+        for val in param_vals:
+            yield val
 
-    def get_temperature(self, star_type, rand_gen=np.random):
+    def gen_temperature(self, star_type, rand_gen=np.random, n_star=None):
         """Return a random temperature in the defined range for the stellar type."""
         param_range = self.temperature[star_type]
-        return(rand_gen.uniform(param_range[0], param_range[1]))
+        param_vals = rand_gen.uniform(param_range[0], param_range[1], size=n_star)
+        for val in param_vals:
+            yield val
 
-    def get_metallicity(self, star_type, rand_gen=np.random):
+    def gen_metallicity(self, star_type, rand_gen=np.random, n_star=None):
         """Return a random metallicity (log rel. solar) in the defined range for the stellar type."""
         param_range = self.metallicity[star_type]
-        return(rand_gen.uniform(param_range[0], param_range[1]))
+        param_vals = rand_gen.uniform(param_range[0], param_range[1], size=n_star)
+        for val in param_vals:
+            yield val
 
-    def get_gravity(self, star_type, rand_gen=np.random):
+    def gen_gravity(self, star_type, rand_gen=np.random, n_star=None):
         """Return a random surface gravity (rel. solar) in the defined range for the stellar type."""
         param_range = self.gravity[star_type]
-        return(rand_gen.uniform(param_range[0], param_range[1]))
+        param_vals = rand_gen.uniform(param_range[0], param_range[1], size=n_star)
+        for val in param_vals:
+            yield val
 
 
 def _stellar_distribution(seed=None, n_star=None, hottest_star='A', coolest_star='M',
@@ -824,10 +832,12 @@ def _stellar_distribution(seed=None, n_star=None, hottest_star='A', coolest_star
     star_dist = StarCat.distribution(n_star, rand_gen=rand_gen)
     for star_type in star_dist:
         n_star_type = star_dist[star_type]
+        temperature_gen = StarCat.gen_temperature(star_type, rand_gen=rand_gen, n_star=n_star_type)
+        luminosity_gen = StarCat.gen_luminosity(star_type, rand_gen=rand_gen, n_star=n_star_type)
+        metallicity_gen = StarCat.gen_metallicity(star_type, rand_gen=rand_gen, n_star=n_star_type)
+        gravity_gen = StarCat.gen_gravity(star_type, rand_gen=rand_gen, n_star=n_star_type)
         flux_stars_total = 0.0
         for _i in range(n_star_type):
-            temp_use = StarCat.get_temperature(star_type, rand_gen=rand_gen)
-            lum_use = StarCat.get_luminosity(star_type, rand_gen=rand_gen)
             bounds_test = True
             while bounds_test:
                 x_dist = rand_gen.uniform(-max_star_dist * x_scale, max_star_dist * x_scale)
@@ -840,13 +850,12 @@ def _stellar_distribution(seed=None, n_star=None, hottest_star='A', coolest_star
             y_star.append(y_size / 2 + np.degrees(np.arctan(y_dist / z_dist)) / pixel_scale_degrees)
             z_star.append(z_dist)
             distance_attenuation = z_dist ** 2.0
+            lum_use = next(luminosity_gen)
             flux_use = lum_use * luminosity_to_flux / distance_attenuation
-            metal_use = StarCat.get_metallicity(star_type, rand_gen=rand_gen)
-            grav_use = StarCat.get_gravity(star_type, rand_gen=rand_gen)
-            temperature.append(temp_use)
             flux.append(flux_use)
-            metallicity.append(metal_use)
-            surface_gravity.append(grav_use)
+            temperature.append(next(temperature_gen))
+            metallicity.append(next(metallicity_gen))
+            surface_gravity.append(next(gravity_gen))
             flux_stars_total += flux_use
         flux_star.append(flux_stars_total)
     flux_total = np.sum(flux_star)
