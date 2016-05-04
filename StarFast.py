@@ -166,48 +166,29 @@ class StarSim:
         sky_radius = np.sqrt(x_size_use**2.0 + y_size_use**2.0) * self.wcs.pixelScale().asDegrees()
         self.catalog = _cat_sim(sky_radius=sky_radius, wcs=self.wcs, _wcs_ref=self._wcs_ref,
                                 name=name, n_star=n_star, seed=seed, **kwargs)
-        schema = self.catalog.getSchema()
         self.seed = seed
         if sed_list is None:
             sed_list = self.sed_list
 
-        if name is None:
-            # If no name is supplied, find the first entry in the schema in the format *_flux
-            schema_entry = schema.extract("*_fluxRaw", ordered='true')
-            fluxName = schema_entry.iterkeys().next()
-        else:
-            fluxName = name + '_fluxRaw'
-
-        fluxKey = schema.find(fluxName).key
-        temperatureKey = schema.find("temperature").key
-        metalKey = schema.find("metallicity").key
-        gravityKey = schema.find("gravity").key
         # if catalog.isContiguous()
-        xv = self.catalog.getX()
-        yv = self.catalog.getY()
+        xv_full = self.catalog.getX()
+        yv_full = self.catalog.getY()
 
         # The catalog may include stars outside of the field of view of this observation, so trim those.
         xmin = self.edge_dist
         xmax = CoordsXY.xsize(base=True) - self.edge_dist
         ymin = self.edge_dist
         ymax = CoordsXY.ysize(base=True) - self.edge_dist
-        include_flag = ((xv >= xmin) & (xv < xmax) & (yv >= ymin) & (yv < ymax))
-        xv = xv[include_flag]
-        yv = yv[include_flag]
-        n_star = np.sum(include_flag)
-        flux = (self.catalog[fluxKey] / self.psf.getFlux())[include_flag]
-        temperatures = (self.catalog[temperatureKey])[include_flag]
-        metallicities = (self.catalog[metalKey])[include_flag]
-        gravities = (self.catalog[gravityKey])[include_flag]
+        include_flag = ((xv_full >= xmin) & (xv_full < xmax) & (yv_full >= ymin) & (yv_full < ymax))
+        xv = xv_full[include_flag]
+        yv = yv_full[include_flag]
+        catalog_use = self.catalog[include_flag]
+
+        n_star = len(xv)
         flux_arr = np.zeros((n_star, self.n_step))
 
-        for _i in range(n_star):
-            f_star = flux[_i]
-            t_star = temperatures[_i]
-            z_star = metallicities[_i]
-            g_star = gravities[_i]
-            star_spectrum = _star_gen(sed_list=sed_list, temperature=t_star, flux=f_star,
-                                      bandpass=self.bandpass, metallicity=z_star, surface_gravity=g_star)
+        for _i, source_record in enumerate(catalog_use):
+            star_spectrum = _star_gen(sed_list=sed_list, bandpass=self.bandpass, source_record=source_record)
             flux_arr[_i, :] = np.array([flux_val for flux_val in star_spectrum])
         flux_tot = np.sum(flux_arr, axis=1)
         if n_star > 3:
@@ -306,6 +287,7 @@ class StarSim:
             psf = self.psf
         if self.psf is None:
             self.load_psf(psf)
+        psf_norm = 1.0 / self.psf.getFlux()
         timing_fft = -time.time()
 
         for _i, offset in enumerate(dcr_gen):
@@ -323,7 +305,7 @@ class StarSim:
                 pass
             convol_single = source_model_use * rfft2(psf_image.array)
             convol += convol_single
-        return_image = np.real(fftshift(irfft2(convol))) * CoordsXY.oversample**2.0
+        return_image = np.real(fftshift(irfft2(convol))) * CoordsXY.oversample**2.0 * psf_norm
         timing_fft += time.time()
         if verbose:
             print("FFT timing for %i DCR planes: [%0.3fs | %0.3fs per plane]"
@@ -566,8 +548,7 @@ def _cat_sim(seed=None, n_star=None, n_galaxy=None, sky_radius=None, name=None, 
     return(catalog.copy(True))  # Return a copy to make sure it is contiguous in memory.
 
 
-def _star_gen(sed_list=None, seed=None, temperature=5600, metallicity=0.0, surface_gravity=1.0,
-              flux=1.0, bandpass=None, verbose=True):
+def _star_gen(sed_list=None, seed=None, bandpass=None, source_record=None, verbose=True):
     """Generate a randomized spectrum at a given temperature over a range of wavelengths."""
     """
         Either use a supplied list of SEDs to be drawn from, or use a blackbody radiation model.
@@ -604,6 +585,15 @@ def _star_gen(sed_list=None, seed=None, temperature=5600, metallicity=0.0, surfa
     bandpass_gen = (bp for bp in bandpass_vals)
     bandpass_gen2 = (bp2 for bp2 in bandpass_vals)
 
+    schema = source_record.getSchema()
+    schema_entry = schema.extract("*_fluxRaw", ordered='true')
+    fluxName = schema_entry.iterkeys().next()
+
+    flux_raw = source_record[schema.find(fluxName).key]
+    temperature = source_record["temperature"]
+    metallicity = source_record["metallicity"]
+    surface_gravity = source_record["gravity"]
+
     # If the desired temperature is outside of the range of models in sed_list, then use a blackbody.
     if temperature >= t_ref[0] and temperature <= t_ref[1]:
         temp_weight = np.abs(temperatures / temperature - 1.0)
@@ -638,7 +628,7 @@ def _star_gen(sed_list=None, seed=None, temperature=5600, metallicity=0.0, surfa
         for wave_start, wave_end in _wavelength_iterator(bandpass):
             sed_band_integral += (next(bandpass_gen2)
                                   * sed_integrate(wave_start=wave_start, wave_end=wave_end))
-        flux_band_norm = flux_to_jansky * flux * flux_band_fraction / bandwidth_hz
+        flux_band_norm = flux_to_jansky * flux_raw * flux_band_fraction / bandwidth_hz
 
         for wave_start, wave_end in _wavelength_iterator(bandpass):
             yield(flux_band_norm * next(bandpass_gen)
@@ -676,7 +666,7 @@ def _star_gen(sed_list=None, seed=None, temperature=5600, metallicity=0.0, surfa
         radiance_band_integral = 0.0
         for wave_start, wave_end in _wavelength_iterator(bandpass):
             radiance_band_integral += next(bandpass_gen2) * radiance_calc(wave_start, wave_end)
-        flux_band_norm = flux_to_jansky * flux * flux_band_fraction / bandwidth_hz
+        flux_band_norm = flux_to_jansky * flux_raw * flux_band_fraction / bandwidth_hz
 
         for wave_start, wave_end in _wavelength_iterator(bandpass):
             yield(flux_band_norm * next(bandpass_gen)
@@ -913,6 +903,13 @@ class _StellarDistribution():
         self.dec = dec
 
 
+class ReferenceCatalog:
+    """Create a reference catalog useable by the LSST image differencing and coaddition software."""
+
+    def __init__(self):
+        pass
+
+
 # -=-=-=-=-=-=-=-=-=-=-=-=-=-=-=-=-=-=-=-=-=-=-=-=-=-=-=-=-=-=-=-=-=-=-=-=-=-=-=-
 
 class _BasicBandpass:
@@ -1137,15 +1134,30 @@ class StarGenTestCase(utilsTests.TestCase):
     def setUp(self):
         """Define parameters used by every test."""
         self.bandpass = _BasicBandpass(band_name='g', wavelength_step=10)
-        self.flux = 1E-9
+        flux_raw = 1E-9
+        temperature = 5600.0
+        schema = afwTable.SourceTable.makeMinimalSchema()
+        schema.addField("test_fluxRaw", type="D")
+        schema.addField("test_Centroid_x", type="D")
+        schema.addField("test_Centroid_y", type="D")
+        schema.addField("temperature", type="D")
+        schema.addField("spectral_id", type="D")
+        schema.addField("metallicity", type="D")
+        schema.addField("gravity", type="D")
+        catalog = afwTable.SourceCatalog(schema)
+        source_rec = catalog.addNew()
+        source_rec.set("test_fluxRaw", flux_raw)
+        source_rec.set("temperature", temperature)
+        self.source_rec = source_rec
 
     def tearDown(self):
         """Clean up."""
         del self.bandpass
+        del self.source_rec
 
     def test_blackbody_spectrum(self):
         """Check the blackbody spectrum against pre-computed values."""
-        star_gen = _star_gen(temperature=5600, flux=self.flux, bandpass=self.bandpass, verbose=False)
+        star_gen = _star_gen(source_record=self.source_rec, bandpass=self.bandpass, verbose=False)
         spectrum = np.array([flux for flux in star_gen])
         pre_comp_spectrum = np.array([5.763797967, 5.933545118, 6.083468705, 6.213969661,
                                       6.325613049, 6.419094277, 6.495208932, 6.554826236,
@@ -1156,9 +1168,8 @@ class StarGenTestCase(utilsTests.TestCase):
 
     def test_sed_spectrum(self):
         """Check a spectrum defined by an SED against pre-computed values."""
-        temperature = 5600
-        sed_list = [_BasicSED(temperature)]
-        star_gen = _star_gen(sed_list=sed_list, temperature=temperature, flux=self.flux,
+        sed_list = [_BasicSED(self.source_rec["temperature"])]
+        star_gen = _star_gen(sed_list=sed_list, source_record=self.source_rec,
                              bandpass=self.bandpass, verbose=True)
         spectrum = np.array([flux for flux in star_gen])
         pre_comp_spectrum = np.array([1.06433106, 1.09032205, 1.11631304, 1.14230403, 1.16829502,
