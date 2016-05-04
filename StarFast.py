@@ -535,14 +535,8 @@ def _cat_sim(seed=None, n_star=None, n_galaxy=None, sky_radius=None, name=None, 
 
     if _wcs_ref is None:
         _wcs_ref = wcs.clone()
-    star_properties = _stellar_distribution(seed=seed, n_star=n_star, sky_radius=sky_radius,
-                                            wcs=_wcs_ref, **kwargs)
-    temperature = star_properties[0]
-    flux = star_properties[1]
-    metallicity = star_properties[2]
-    surface_gravity = star_properties[3]
-    ra = star_properties[4]
-    dec = star_properties[5]
+    star_properties = _StellarDistribution(seed=seed, n_star=n_star, sky_radius=sky_radius,
+                                           wcs=_wcs_ref, **kwargs)
 
     catalog = afwTable.SourceCatalog(schema)
     fluxKey = schema.find(fluxName).key
@@ -555,17 +549,20 @@ def _cat_sim(seed=None, n_star=None, n_galaxy=None, sky_radius=None, name=None, 
     gravityKey = schema.find("gravity").key
     centroidKey = afwTable.Point2DKey(schema["slot_Centroid"])
     for _i in range(n_star):
-        source_test_centroid = wcs.skyToPixel(ra[_i], dec[_i])
+        ra = star_properties.ra[_i]
+        dec = star_properties.dec[_i]
+        source_test_centroid = wcs.skyToPixel(ra, dec)
         source = catalog.addNew()
-        source.set(fluxKey, flux[_i])
+        source.set(fluxKey, star_properties.raw_flux[_i])
         source.set(centroidKey, source_test_centroid)
-        source.set(raKey, ra[_i])
-        source.set(decKey, dec[_i])
+        source.set(raKey, ra)
+        source.set(decKey, dec)
         source.set(fluxSigmaKey, 0.)
-        source.set(temperatureKey, temperature[_i])
-        source.set(metalKey, metallicity[_i])
-        source.set(gravityKey, surface_gravity[_i])
+        source.set(temperatureKey, star_properties.temperature[_i])
+        source.set(metalKey, star_properties.metallicity[_i])
+        source.set(gravityKey, star_properties.surface_gravity[_i])
         source.set(flagKey, False)
+    del star_properties
     return(catalog.copy(True))  # Return a copy to make sure it is contiguous in memory.
 
 
@@ -840,74 +837,80 @@ class StarCatalog:
             yield val
 
 
-def _stellar_distribution(seed=None, n_star=None, hottest_star='A', coolest_star='M',
-                          sky_radius=None, wcs=None, verbose=True, **kwargs):
-    """!Function that attempts to return a realistic distribution of stellar properties.
-    Returns temperature, flux, metallicity, surface gravity
-    temperature in units Kelvin
-    flux in units W/m**2
-    metallicity is logarithmic metallicity relative to solar
-    surface gravity relative to solar
-    """
-    lum_solar = 3.846e26  # Solar luminosity, in Watts
-    ly = 9.4607e15  # one light year, in meters
-    pi = np.pi
-    pixel_scale_degrees = wcs.pixelScale().asDegrees()
-    pix_origin_offset = 0.5
-    x_center, y_center = wcs.getPixelOrigin()
-    x_center += pix_origin_offset
-    y_center += pix_origin_offset
-    max_star_dist = 1000  # light years
-    luminosity_to_flux = lum_solar / (4.0 * pi * ly**2.0)
-    rand_gen = np.random
-    if seed is not None:
-        rand_gen.seed(seed)
+class _StellarDistribution():
+    def __init__(self, seed=None, n_star=None, hottest_star='A', coolest_star='M',
+                 sky_radius=None, wcs=None, verbose=True, **kwargs):
+        """!Function that attempts to return a realistic distribution of stellar properties.
+        Returns temperature, flux, metallicity, surface gravity
+        temperature in units Kelvin
+        flux in units W/m**2
+        metallicity is logarithmic metallicity relative to solar
+        surface gravity relative to solar
+        """
+        lum_solar = 3.846e26  # Solar luminosity, in Watts
+        ly = 9.4607e15  # one light year, in meters
+        pi = np.pi
+        pixel_scale_degrees = wcs.pixelScale().asDegrees()
+        pix_origin_offset = 0.5
+        x_center, y_center = wcs.getPixelOrigin()
+        x_center += pix_origin_offset
+        y_center += pix_origin_offset
+        max_star_dist = 1000  # light years
+        luminosity_to_flux = lum_solar / (4.0 * pi * ly**2.0)
+        rand_gen = np.random
+        if seed is not None:
+            rand_gen.seed(seed)
 
-    StarCat = StarCatalog(hottest_star=hottest_star, coolest_star=coolest_star)
-    temperature = []
-    flux = []
-    metallicity = []
-    surface_gravity = []
-    flux_star = []
-    ra = []
-    dec = []
+        StarCat = StarCatalog(hottest_star=hottest_star, coolest_star=coolest_star)
+        temperature = []
+        flux = []
+        metallicity = []
+        surface_gravity = []
+        flux_star = []
+        ra = []
+        dec = []
 
-    star_dist = StarCat.distribution(n_star, rand_gen=rand_gen)
-    for star_type in star_dist:
-        n_star_type = star_dist[star_type]
-        temperature_gen = StarCat.gen_temperature(star_type, rand_gen=rand_gen, n_star=n_star_type)
-        luminosity_gen = StarCat.gen_luminosity(star_type, rand_gen=rand_gen, n_star=n_star_type)
-        metallicity_gen = StarCat.gen_metallicity(star_type, rand_gen=rand_gen, n_star=n_star_type)
-        gravity_gen = StarCat.gen_gravity(star_type, rand_gen=rand_gen, n_star=n_star_type)
-        flux_stars_total = 0.0
-        distance_attenuation = (rand_gen.uniform(1.0, max_star_dist, size=n_star_type) ** 2.0 +
-                                rand_gen.uniform(1.0, max_star_dist, size=n_star_type) ** 2.0 +
-                                rand_gen.uniform(1.0, max_star_dist, size=n_star_type) ** 2.0) / 3.0
-        star_radius = np.sqrt((rand_gen.uniform(-sky_radius, sky_radius, size=n_star_type) ** 2.0 +
-                               rand_gen.uniform(-sky_radius, sky_radius, size=n_star_type) ** 2.0) / 2.0)
-        star_angle = rand_gen.uniform(0.0, 2.0 * pi, size=n_star_type)
-        pseudo_x = x_center + star_radius * np.cos(star_angle) / pixel_scale_degrees
-        pseudo_y = y_center + star_radius * np.sin(star_angle) / pixel_scale_degrees
+        star_dist = StarCat.distribution(n_star, rand_gen=rand_gen)
+        for star_type in star_dist:
+            n_star_type = star_dist[star_type]
+            temperature_gen = StarCat.gen_temperature(star_type, rand_gen=rand_gen, n_star=n_star_type)
+            luminosity_gen = StarCat.gen_luminosity(star_type, rand_gen=rand_gen, n_star=n_star_type)
+            metallicity_gen = StarCat.gen_metallicity(star_type, rand_gen=rand_gen, n_star=n_star_type)
+            gravity_gen = StarCat.gen_gravity(star_type, rand_gen=rand_gen, n_star=n_star_type)
+            flux_stars_total = 0.0
+            distance_attenuation = (rand_gen.uniform(1.0, max_star_dist, size=n_star_type) ** 2.0 +
+                                    rand_gen.uniform(1.0, max_star_dist, size=n_star_type) ** 2.0 +
+                                    rand_gen.uniform(1.0, max_star_dist, size=n_star_type) ** 2.0) / 3.0
+            star_radius = np.sqrt((rand_gen.uniform(-sky_radius, sky_radius, size=n_star_type) ** 2.0 +
+                                   rand_gen.uniform(-sky_radius, sky_radius, size=n_star_type) ** 2.0) / 2.0)
+            star_angle = rand_gen.uniform(0.0, 2.0 * pi, size=n_star_type)
+            pseudo_x = x_center + star_radius * np.cos(star_angle) / pixel_scale_degrees
+            pseudo_y = y_center + star_radius * np.sin(star_angle) / pixel_scale_degrees
 
-        for _i in range(n_star_type):
-            ra_star, dec_star = wcs.pixelToSky(pseudo_x[_i], pseudo_y[_i]).getPosition()
-            ra.append(ra_star * afwGeom.degrees)
-            dec.append(dec_star * afwGeom.degrees)
-            flux_use = next(luminosity_gen) * luminosity_to_flux / distance_attenuation[_i]
-            flux.append(flux_use)
-            temperature.append(next(temperature_gen))
-            metallicity.append(next(metallicity_gen))
-            surface_gravity.append(next(gravity_gen))
-            flux_stars_total += flux_use
-        flux_star.append(flux_stars_total)
-    flux_total = np.sum(flux_star)
-    flux_star = [100. * _f / flux_total for _f in flux_star]
-    info_string = "Number and flux contribution of stars of each type:\n"
-    for _i, star_type in enumerate(star_dist):
-        info_string += str(" [%s %i| %0.2f%%]" % (star_type, star_dist[star_type], flux_star[_i]))
-    if verbose:
-        print(info_string)
-    return((temperature, flux, metallicity, surface_gravity, ra, dec))
+            for _i in range(n_star_type):
+                ra_star, dec_star = wcs.pixelToSky(pseudo_x[_i], pseudo_y[_i]).getPosition()
+                ra.append(ra_star * afwGeom.degrees)
+                dec.append(dec_star * afwGeom.degrees)
+                flux_use = next(luminosity_gen) * luminosity_to_flux / distance_attenuation[_i]
+                flux.append(flux_use)
+                temperature.append(next(temperature_gen))
+                metallicity.append(next(metallicity_gen))
+                surface_gravity.append(next(gravity_gen))
+                flux_stars_total += flux_use
+            flux_star.append(flux_stars_total)
+        flux_total = np.sum(flux_star)
+        flux_star = [100. * _f / flux_total for _f in flux_star]
+        info_string = "Number and flux contribution of stars of each type:\n"
+        for _i, star_type in enumerate(star_dist):
+            info_string += str(" [%s %i| %0.2f%%]" % (star_type, star_dist[star_type], flux_star[_i]))
+        if verbose:
+            print(info_string)
+        self.temperature = temperature
+        self.raw_flux = flux
+        self.metallicity = metallicity
+        self.surface_gravity = surface_gravity
+        self.ra = ra
+        self.dec = dec
 
 
 # -=-=-=-=-=-=-=-=-=-=-=-=-=-=-=-=-=-=-=-=-=-=-=-=-=-=-=-=-=-=-=-=-=-=-=-=-=-=-=-
@@ -1186,11 +1189,11 @@ class StellarDistributionTestCase(utilsTests.TestCase):
 
     def test_star_type_properties(self):
         """Check that the properties of stars of a given type all fall in the right ranges."""
-        star_properties = _stellar_distribution(seed=self.seed, wcs=self.wcs, sky_radius=self.sky_radius,
-                                                n_star=3, hottest_star='G', coolest_star='G', verbose=False)
-        temperature = star_properties[0]
-        metallicity = star_properties[2]
-        surface_gravity = star_properties[3]
+        star_properties = _StellarDistribution(seed=self.seed, wcs=self.wcs, sky_radius=self.sky_radius,
+                                               n_star=3, hottest_star='G', coolest_star='G', verbose=False)
+        temperature = star_properties.temperature
+        metallicity = star_properties.metallicity
+        surface_gravity = star_properties.surface_gravity
         temp_range_g_star = [5200, 6000]
         grav_range_g_star = [0.0, 1.5]
         metal_range_g_star = [-3.0, 0.5]
@@ -1205,10 +1208,10 @@ class StellarDistributionTestCase(utilsTests.TestCase):
 
     def test_star_xy_range(self):
         """Check that star pixel coordinates are all in range."""
-        star_properties = _stellar_distribution(seed=self.seed, wcs=self.wcs, sky_radius=self.sky_radius,
-                                                n_star=3, hottest_star='G', coolest_star='G', verbose=False)
-        ra = star_properties[4]
-        dec = star_properties[5]
+        star_properties = _StellarDistribution(seed=self.seed, wcs=self.wcs, sky_radius=self.sky_radius,
+                                               n_star=3, hottest_star='G', coolest_star='G', verbose=False)
+        ra = star_properties.ra
+        dec = star_properties.dec
         x = []
         y = []
         for _ra, _dec in zip(ra, dec):
