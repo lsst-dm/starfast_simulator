@@ -45,6 +45,7 @@ from __future__ import print_function, division, absolute_import
 from collections import OrderedDict
 import numpy as np
 from numpy.fft import rfft2, irfft2, fftshift
+import os
 from scipy import constants
 import lsst.afw.geom as afwGeom
 import lsst.afw.image as afwImage
@@ -68,8 +69,8 @@ class StarSim:
 
     def __init__(self, psf=None, pixel_scale=None, pad_image=1.5, catalog=None, sed_list=None,
                  x_size=512, y_size=512, band_name='g', photons_per_jansky=None, obsid=100,
-                 ra=lsst_lon, dec=lsst_lat, ra_reference=None, dec_reference=None,
-                 sky_rotation=0.0, exposure_time=30.0, **kwargs):
+                 ra=None, dec=None, ra_reference=lsst_lon, dec_reference=lsst_lat,
+                 sky_rotation=0.0, exposure_time=30.0, saturation_value=65000, **kwargs):
         """
         Set up the fixed parameters of the simulation.
         @param psf: psf object from Galsim. Needs to have methods getFWHM() and drawImage().
@@ -88,6 +89,8 @@ class StarSim:
         @param ra_reference: Right Ascension of the center of the field for the reference catalog
         @param dec_reference: Declination of the center of the field for the reference catalog
         @param sky_rotation: Rotation of the wcs, in degrees.
+        @param exposure_time: Length of the exposure, in seconds
+        @param saturation_value: Maximum electron counts of the detector before saturation. Turn off with None
         """
         bandpass = _load_bandpass(band_name=band_name, **kwargs)
         self.n_step = int(np.ceil((bandpass.wavelen_max - bandpass.wavelen_min) / bandpass.wavelen_step))
@@ -106,10 +109,10 @@ class StarSim:
         self.bbox = afwGeom.Box2I(afwGeom.Point2I(0, 0), afwGeom.ExtentI(x_size, y_size))
         self.wcs = _create_wcs(pixel_scale=self.coord.scale(), bbox=self.bbox,
                                ra=ra, dec=dec, sky_rotation=sky_rotation)
-        if ra_reference is None:
-            ra_reference = ra
-        if dec_reference is None:
-            dec_reference = dec
+        if ra is None:
+            ra = ra_reference
+        if dec is None:
+            dec = dec_reference
         self._wcs_ref = _create_wcs(pixel_scale=self.coord.scale(), bbox=self.bbox,
                                     ra=ra_reference, dec=dec_reference, sky_rotation=0.0)
         self.edge_dist = None
@@ -119,13 +122,14 @@ class StarSim:
         self.source_model = None
         self.bright_model = None
         self.n_star = None
+        self.saturation = saturation_value
         self.obsid = obsid  # observation number used when persisting images
         if photons_per_jansky is None:
             photon_energy = constants.Planck * constants.speed_of_light / (bandpass.calc_eff_wavelen() / 1e9)
-            kludge_factor = 1.0 / 500.0  # Some factor is missing below, and this seems to be necessary.
-            photons_per_jansky = (1e-26 * (self.photoParams.effarea / 1e4) * self.photoParams.exptime
-                                  * bandpass.calc_bandwidth() / photon_energy) * kludge_factor
-        self.photons_per_jansky = photons_per_jansky  # used to approximate the effect of photon shot noise.
+            photons_per_jansky = (1e-26 * (self.photoParams.effarea / 1e4)
+                                  * bandpass.calc_bandwidth() / photon_energy)
+
+        self.counts_per_jansky = photons_per_jansky / self.photoParams.gain
 
     def load_psf(self, psf, edge_dist=None, _kernel_radius=None, **kwargs):
         """
@@ -210,6 +214,66 @@ class StarSim:
         CoordsXY.set_x(xv)
         CoordsXY.set_y(yv)
 
+    def make_reference_catalog(self, output_directory=None, filter_list=None, magnitude_limit=None):
+        """
+        Create a reference catalog and write it to disk.
+        @param output_directory: path to directory where catalog will be saved.
+        @param filter_list: list of filters to use to create magnitudes
+        @param magnitude_limit: faintest magnitude star to include in the catalog
+        """
+        flux_to_jansky = 1.0e26
+        base_filename = "starfast_ref_obs.txt"
+        if output_directory is None:
+            file_path = base_filename
+        else:
+            if output_directory[-4:] == ".txt":
+                file_path = output_directory
+            else:
+                file_path = os.path.join(output_directory, base_filename)
+        if filter_list is None:
+            filter_list = ['u', 'g', 'r', 'i', 'z', 'y']
+        n_filter = len(filter_list)
+        wavelength_step = self.bandpass.wavelen_step
+        bp_midrange = _load_bandpass(band_name=filter_list[n_filter // 2], wavelength_step=wavelength_step)
+        bandwidth_hz = bp_midrange.calc_bandwidth()
+        if self.catalog is None:
+            raise ValueError("You must first load a catalog with load_catalog!")
+        schema = self.catalog.getSchema()
+        schema_entry = schema.extract("*_fluxRaw", ordered='true')
+        fluxName = schema_entry.iterkeys().next()
+        flux_raw = self.catalog[schema.find(fluxName).key]
+        magnitude_raw = -2.512 * np.log10(flux_raw * flux_to_jansky / bandwidth_hz / 3631.0)
+        if magnitude_limit is None:
+            magnitude_limit = (np.min(magnitude_raw) + np.max(magnitude_raw)) / 2.0
+        src_use = magnitude_raw < magnitude_limit
+
+        n_star = np.sum(src_use)
+        print("Writing %i stars brighter than %2.1f mag to reference catalog in %i bands"
+              % (n_star, magnitude_limit, n_filter))
+        print("Min/max magnitude: ", np.min(magnitude_raw), np.max(magnitude_raw))
+        schema = self.catalog.getSchema()
+        raKey = schema.find("coord_ra").key
+        decKey = schema.find("coord_dec").key
+        data_array = np.zeros((n_star, 3 + n_filter))
+        data_array[:, 0] = np.arange(n_star)
+        data_array[:, 1] = np.degrees((self.catalog[raKey])[src_use])
+        data_array[:, 2] = np.degrees((self.catalog[decKey])[src_use])
+        header = "uniqueId, raJ2000, decJ2000"
+
+        for _f, f_name in enumerate(filter_list):
+            bp = _load_bandpass(band_name=f_name, wavelength_step=wavelength_step)
+            # build an empty list to store the flux of each star in each filter
+            mag_single = []
+            for _i, source_rec in enumerate(self.catalog):
+                if src_use[_i]:
+                    star_spectrum = _star_gen(sed_list=self.sed_list, bandpass=bp, source_record=source_rec)
+                    magnitude = -2.512 * np.log10(np.sum(star_spectrum) / 3631.0)
+                    mag_single.append(magnitude)
+            data_array[:, 3 + _f] = np.array(mag_single)
+            header += ", lsst_%s" % f_name
+
+        np.savetxt(file_path, data_array, delimiter=", ", header=header)
+
     def simulate(self, verbose=True, **kwargs):
         """Call fast_dft.py to construct the input sky model for each frequency slice prior to convolution."""
         CoordsXY = self.coord
@@ -257,18 +321,22 @@ class StarSim:
             bright_image = 0.0
         return_image = source_image + bright_image
 
-        variance_image = np.sqrt(np.abs(return_image) * self.photoParams.gain / self.photons_per_jansky)
+        variance_image = np.ceil(np.sqrt(np.abs(return_image) * self.counts_per_jansky))
         if photon_noise > 0:
             rand_gen = np.random
             if seed is not None:
                 rand_gen.seed(seed - 1.2)
-            return_image += variance_image * rand_gen.normal(scale=photon_noise, size=return_image.shape)
+            return_image = np.round(return_image + variance_image *
+                                    rand_gen.normal(scale=photon_noise, size=return_image.shape))
+        if instrument_noise is None:
+            instrument_noise = self.photoParams.readnoise
 
         if instrument_noise > 0:
             rand_gen = np.random
             if seed is not None:
                 rand_gen.seed(seed - 1.1)
-            return_image += rand_gen.normal(scale=instrument_noise, size=return_image.shape)
+            noise_image = rand_gen.normal(scale=instrument_noise, size=return_image.shape)
+            return_image += noise_image / self.counts_per_jansky
         exposure = self._create_exposure(return_image, variance=variance_image,
                                          elevation=elevation, azimuth=azimuth)
         return(exposure)
@@ -317,7 +385,7 @@ class StarSim:
         return(return_image)
 
     def _create_exposure(self, array, variance=None, elevation=None, azimuth=None):
-        """Convert a numpy array to an LSST exposure."""
+        """Convert a numpy array to an LSST exposure, and units of electron counts."""
         exposure = afwImage.ExposureF(self.bbox)
         exposure.setWcs(self.wcs)
         # We need the filter name in the exposure metadata, and it can't just be set directly
@@ -331,7 +399,7 @@ class StarSim:
         calib = afwImage.Calib()
         calib.setExptime(self.photoParams.exptime)
         exposure.setCalib(calib)
-        exposure.getMaskedImage().getImage().getArray()[:, :] = array
+        exposure.getMaskedImage().getImage().getArray()[:, :] = array * self.counts_per_jansky
         if variance is not None:
             exposure.getMaskedImage().getVariance().getArray()[:, :] = variance
 
@@ -773,7 +841,7 @@ class StarCatalog:
 
         # Intrinsic luminosity, relative to solar.
         self.luminosity = {'M': (0.01, 0.08), 'K': (0.08, 0.6), 'G': (0.6, 1.5), 'F': (1.5, 5.0),
-                           'A': (5.0, 100.0), 'B': (100.0, 30000.0), 'O': (30000.0, 50000.0)}
+                           'A': (5.0, 100.0), 'B': (100.0, 3000.0), 'O': (3000.0, 5000.0)}
         # Surface temperature, in degrees Kelvin.
         self.temperature = {'M': (2400, 3700), 'K': (3700, 5200), 'G': (5200, 6000), 'F': (6000, 7500),
                             'A': (7500, 10000), 'B': (10000, 30000), 'O': (30000, 50000)}
@@ -845,7 +913,8 @@ class _StellarDistribution():
         x_center, y_center = wcs.getPixelOrigin()
         x_center += pix_origin_offset
         y_center += pix_origin_offset
-        max_star_dist = 1000  # light years
+        max_star_dist = 10000.0  # light years
+        min_star_dist = 100.0  # Assume we're not looking at anything close
         luminosity_to_flux = lum_solar / (4.0 * pi * ly**2.0)
         rand_gen = np.random
         if seed is not None:
@@ -862,26 +931,27 @@ class _StellarDistribution():
 
         star_dist = StarCat.distribution(n_star, rand_gen=rand_gen)
         for star_type in star_dist:
-            n_star_type = star_dist[star_type]
-            temperature_gen = StarCat.gen_temperature(star_type, rand_gen=rand_gen, n_star=n_star_type)
-            luminosity_gen = StarCat.gen_luminosity(star_type, rand_gen=rand_gen, n_star=n_star_type)
-            metallicity_gen = StarCat.gen_metallicity(star_type, rand_gen=rand_gen, n_star=n_star_type)
-            gravity_gen = StarCat.gen_gravity(star_type, rand_gen=rand_gen, n_star=n_star_type)
+            n_use = star_dist[star_type]
+            temperature_gen = StarCat.gen_temperature(star_type, rand_gen=rand_gen, n_star=n_use)
+            luminosity_gen = StarCat.gen_luminosity(star_type, rand_gen=rand_gen, n_star=n_use)
+            metallicity_gen = StarCat.gen_metallicity(star_type, rand_gen=rand_gen, n_star=n_use)
+            gravity_gen = StarCat.gen_gravity(star_type, rand_gen=rand_gen, n_star=n_use)
             flux_stars_total = 0.0
-            distance_attenuation = (rand_gen.uniform(1.0, max_star_dist, size=n_star_type) ** 2.0 +
-                                    rand_gen.uniform(1.0, max_star_dist, size=n_star_type) ** 2.0 +
-                                    rand_gen.uniform(1.0, max_star_dist, size=n_star_type) ** 2.0) / 3.0
-            star_radius = np.sqrt((rand_gen.uniform(-sky_radius, sky_radius, size=n_star_type) ** 2.0 +
-                                   rand_gen.uniform(-sky_radius, sky_radius, size=n_star_type) ** 2.0) / 2.0)
-            star_angle = rand_gen.uniform(0.0, 2.0 * pi, size=n_star_type)
-            pseudo_x = x_center + star_radius * np.cos(star_angle) / pixel_scale_degrees
-            pseudo_y = y_center + star_radius * np.sin(star_angle) / pixel_scale_degrees
+            distance_min = np.sqrt((rand_gen.uniform(min_star_dist, max_star_dist, size=n_use) ** 2.0 +
+                                    rand_gen.uniform(min_star_dist, max_star_dist, size=n_use) ** 2.0))
+            distance_attenuation = (distance_min
+                                    + rand_gen.uniform(0, max_star_dist - min_star_dist, size=n_use))
+            star_radial_dist = np.sqrt((rand_gen.uniform(-sky_radius, sky_radius, size=n_use) ** 2.0 +
+                                        rand_gen.uniform(-sky_radius, sky_radius, size=n_use) ** 2.0) / 2.0)
+            star_angle = rand_gen.uniform(0.0, 2.0 * pi, size=n_use)
+            pseudo_x = x_center + star_radial_dist * np.cos(star_angle) / pixel_scale_degrees
+            pseudo_y = y_center + star_radial_dist * np.sin(star_angle) / pixel_scale_degrees
 
-            for _i in range(n_star_type):
+            for _i in range(n_use):
                 ra_star, dec_star = wcs.pixelToSky(pseudo_x[_i], pseudo_y[_i]).getPosition()
                 ra.append(ra_star * afwGeom.degrees)
                 dec.append(dec_star * afwGeom.degrees)
-                flux_use = next(luminosity_gen) * luminosity_to_flux / distance_attenuation[_i]
+                flux_use = next(luminosity_gen) * luminosity_to_flux / distance_attenuation[_i] ** 2.0
                 flux.append(flux_use)
                 temperature.append(next(temperature_gen))
                 metallicity.append(next(metallicity_gen))
@@ -901,13 +971,6 @@ class _StellarDistribution():
         self.surface_gravity = surface_gravity
         self.ra = ra
         self.dec = dec
-
-
-class ReferenceCatalog:
-    """Create a reference catalog useable by the LSST image differencing and coaddition software."""
-
-    def __init__(self):
-        pass
 
 
 # -=-=-=-=-=-=-=-=-=-=-=-=-=-=-=-=-=-=-=-=-=-=-=-=-=-=-=-=-=-=-=-=-=-=-=-=-=-=-=-
