@@ -109,6 +109,7 @@ class StarSim:
         self.bbox = afwGeom.Box2I(afwGeom.Point2I(0, 0), afwGeom.ExtentI(x_size, y_size))
         self.wcs = _create_wcs(pixel_scale=self.coord.scale(), bbox=self.bbox,
                                ra=ra, dec=dec, sky_rotation=sky_rotation)
+        self.sky_rotation = sky_rotation
         if ra is None:
             ra = ra_reference
         if dec is None:
@@ -349,7 +350,7 @@ class StarSim:
         else:
             CoordsXY.set_oversample(1)
         dcr_gen = _dcr_generator(self.bandpass, pixel_scale=CoordsXY.scale(),
-                                 elevation=elevation, azimuth=azimuth, **kwargs)
+                                 elevation=elevation, azimuth=azimuth + self.sky_rotation, **kwargs)
         convol = np.zeros((CoordsXY.ysize(), CoordsXY.xsize() // 2 + 1), dtype='complex64')
         if psf is None:
             psf = self.psf
