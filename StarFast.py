@@ -70,7 +70,8 @@ class StarSim:
     def __init__(self, psf=None, pixel_scale=None, pad_image=1.5, catalog=None, sed_list=None,
                  x_size=512, y_size=512, band_name='g', photons_per_jansky=None, obsid=100,
                  ra=None, dec=None, ra_reference=lsst_lon, dec_reference=lsst_lat,
-                 sky_rotation=0.0, exposure_time=30.0, saturation_value=65000, **kwargs):
+                 sky_rotation=0.0, exposure_time=30.0, saturation_value=65000,
+                 background_level=314, **kwargs):
         """
         Set up the fixed parameters of the simulation.
         @param psf: psf object from Galsim. Needs to have methods getFWHM() and drawImage().
@@ -91,6 +92,7 @@ class StarSim:
         @param sky_rotation: Rotation of the wcs, in degrees.
         @param exposure_time: Length of the exposure, in seconds
         @param saturation_value: Maximum electron counts of the detector before saturation. Turn off with None
+        @param background_level: Number of counts to add to every pixel as a sky background.
         """
         bandpass = _load_bandpass(band_name=band_name, **kwargs)
         self.n_step = int(np.ceil((bandpass.wavelen_max - bandpass.wavelen_min) / bandpass.wavelen_step))
@@ -123,7 +125,8 @@ class StarSim:
         self.source_model = None
         self.bright_model = None
         self.n_star = None
-        self.saturation = saturation_value
+        self.saturation = saturation_value  # in counts
+        self.background = background_level  # in counts
         self.obsid = obsid  # observation number used when persisting images
         if photons_per_jansky is None:
             photon_energy = constants.Planck * constants.speed_of_light / (bandpass.calc_eff_wavelen() / 1e9)
@@ -223,14 +226,6 @@ class StarSim:
         @param magnitude_limit: faintest magnitude star to include in the catalog
         """
         flux_to_jansky = 1.0e26
-        base_filename = "starfast_ref_obs.txt"
-        if output_directory is None:
-            file_path = base_filename
-        else:
-            if output_directory[-4:] == ".txt":
-                file_path = output_directory
-            else:
-                file_path = os.path.join(output_directory, base_filename)
         if filter_list is None:
             filter_list = ['u', 'g', 'r', 'i', 'z', 'y']
         n_filter = len(filter_list)
@@ -273,6 +268,14 @@ class StarSim:
             data_array[:, 3 + _f] = np.array(mag_single)
             header += ", lsst_%s" % f_name
 
+        base_filename = "starfast_ref_obs_s%in%i.txt" % (self.seed, n_star)
+        if output_directory is None:
+            file_path = base_filename
+        else:
+            if output_directory[-4:] == ".txt":
+                file_path = output_directory
+            else:
+                file_path = os.path.join(output_directory, base_filename)
         np.savetxt(file_path, data_array, delimiter=", ", header=header)
 
     def simulate(self, verbose=True, **kwargs):
@@ -320,15 +323,14 @@ class StarSim:
                                                      elevation=elevation, azimuth=azimuth, **kwargs)
         else:
             bright_image = 0.0
-        return_image = source_image + bright_image
+        return_image = (source_image + bright_image) * self.counts_per_jansky + self.background
 
-        variance_image = np.ceil(np.sqrt(np.abs(return_image) * self.counts_per_jansky))
         if photon_noise > 0:
             rand_gen = np.random
             if seed is not None:
                 rand_gen.seed(seed - 1.2)
-            return_image = np.round(return_image + variance_image *
-                                    rand_gen.normal(scale=photon_noise, size=return_image.shape))
+            return_image += np.round(np.sqrt(np.abs(return_image))
+                                     * rand_gen.normal(scale=photon_noise, size=return_image.shape))
         if instrument_noise is None:
             instrument_noise = self.photoParams.readnoise
 
@@ -337,9 +339,8 @@ class StarSim:
             if seed is not None:
                 rand_gen.seed(seed - 1.1)
             noise_image = rand_gen.normal(scale=instrument_noise, size=return_image.shape)
-            return_image += noise_image / self.counts_per_jansky
-        exposure = self._create_exposure(return_image, variance=variance_image,
-                                         elevation=elevation, azimuth=azimuth)
+            return_image += noise_image
+        exposure = self._create_exposure(return_image, elevation=elevation, azimuth=azimuth)
         return(exposure)
 
     def _convolve_subroutine(self, sky_noise_gen, psf=None, verbose=True, bright=False,
@@ -400,9 +401,23 @@ class StarSim:
         calib = afwImage.Calib()
         calib.setExptime(self.photoParams.exptime)
         exposure.setCalib(calib)
-        exposure.getMaskedImage().getImage().getArray()[:, :] = array * self.counts_per_jansky
-        if variance is not None:
-            exposure.getMaskedImage().getVariance().getArray()[:, :] = variance
+        exposure.getMaskedImage().getImage().getArray()[:, :] = array
+        if variance is None:
+            variance = np.abs(array)
+        exposure.getMaskedImage().getVariance().getArray()[:, :] = variance
+
+        mask = exposure.getMaskedImage().getMask().getArray()
+        edge_maskval = afwImage.MaskU_getPlaneBitMask("EDGE")
+        edge_mask_dist = np.ceil(self.psf.getFWHM())
+        mask[0: edge_mask_dist, :] = edge_maskval
+        mask[:, 0: edge_mask_dist] = edge_maskval
+        mask[-edge_mask_dist:, :] = edge_maskval
+        mask[:, -edge_mask_dist:] = edge_maskval
+        # # Check for saturation, and mask any saturated pixels
+        # sat_maskval = afwImage.MaskU_getPlaneBitMask("SAT")
+        # if np.max(array) > self.saturation:
+        #     y_sat, x_sat = np.where(array >= self.saturation)
+        #     mask[y_sat, x_sat] += sat_maskval
 
         hour_angle = (90.0 - elevation) * np.cos(np.radians(azimuth)) / 15.0
         mjd = 59000.0 + (lsst_lat / 15.0 - hour_angle) / 24.0
