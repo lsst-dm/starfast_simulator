@@ -23,10 +23,13 @@
 from __future__ import print_function, division, absolute_import
 import numpy as np
 
+__all__ = ["refraction", "diff_refraction"]
+
 
 def refraction(wavelength, zenith_angle, atmospheric_pressure, temperature, humidity=10,
                latitude=-30.244639, altitude=2663.):
-    """Calculate overall refraction under atmospheric and observing conditions.
+    """Calculate overall refraction under atmospheric and observing conditions."""
+    """
     @param wavelength: wavelength is in nm (valid for 230.2 < wavelength < 2058.6), may be an array
     @param zenith_angle: zenith angle in degrees, may be an array
     @param atmospheric_pressure: pressure is in atmospheres
@@ -47,7 +50,7 @@ def refraction(wavelength, zenith_angle, atmospheric_pressure, temperature, humi
 
     # Account for oblate Earth
     relative_gravity = (1. + 0.005302 * np.sin(np.radians(latitude))**2. +
-                        -0.00000583 * np.sin(np.radians(2. * latitude))**2. - 0.000000315 * altitude)
+                        (-0.00000583) * np.sin(np.radians(2. * latitude))**2. - 0.000000315 * altitude)
 
     tanZ = np.tan(np.radians(zenith_angle))
 
@@ -87,7 +90,7 @@ def n_delta(wavelength, dry_pressure, water_vapor_pressure=0.0, temperature=300.
                     (4547.3 / (38.9 - np.power(wave_num, 2.))))
 
     wet_air_term = (6487.31 + 58.058 * np.power(wave_num, 2.) +
-                    -0.71150 * np.power(wave_num, 4.) + 0.08851 * np.power(wave_num, 6.))
+                    (-0.71150) * np.power(wave_num, 4.) + 0.08851 * np.power(wave_num, 6.))
 
     return (dry_air_term * density_factor_dry(dry_pressure, temperature) +
             wet_air_term * density_factor_water(water_vapor_pressure, temperature))
@@ -95,8 +98,8 @@ def n_delta(wavelength, dry_pressure, water_vapor_pressure=0.0, temperature=300.
 
 def density_factor_dry(dry_pressure, temperature):
     """Calculate dry air pressure term to refractive index calculation."""
-    eqn_1 = (1. + dry_pressure * (57.90E-8 - (9.3250E-4 / temperature)
-             + (0.25844 / np.power(temperature, 2.))))
+    eqn_1 = (1. + dry_pressure * (57.90E-8 - (9.3250E-4 / temperature) +
+             (0.25844 / np.power(temperature, 2.))))
 
     return eqn_1 * dry_pressure / temperature
 
@@ -115,5 +118,5 @@ def humidity_to_pressure(humidity=20., temperature=15.):
     pascals_to_mbar = 60. * 1.333224 / 101325.0
     temperature_Kelvin = temperature + 273.15
     saturation_pressure = (pascals_to_mbar * np.exp(77.3450 + 0.0057 * temperature_Kelvin +
-                           -7235.0 / temperature_Kelvin) / np.power(temperature_Kelvin, 8.2))
+                           (-7235.0) / temperature_Kelvin) / np.power(temperature_Kelvin, 8.2))
     return (humidity / 100.0) * saturation_pressure

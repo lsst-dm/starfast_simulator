@@ -50,7 +50,9 @@ from scipy import constants
 import lsst.afw.geom as afwGeom
 import lsst.afw.image as afwImage
 import lsst.afw.coord as afwCoord
+import lsst.afw.math as afwMath
 import lsst.afw.table as afwTable
+import lsst.meas.algorithms as measAlg
 import lsst.pex.policy as pexPolicy
 from lsst.sims.photUtils import Bandpass, matchStar, PhotometricParameters
 from lsst.utils import getPackageDir
@@ -58,22 +60,22 @@ from calc_refractive_index import diff_refraction
 from fast_dft import fast_dft
 import time
 import unittest
-import lsst.utils.tests as utilsTests
+import lsst.utils.tests
 
 lsst_lat = -30.244639
 lsst_lon = -70.749417
 
 
 class StarSim:
-    """!Class that defines a random simulated region of sky, and allows fast transformations."""
+    """Class that defines a random simulated region of sky, and allows fast transformations."""
 
     def __init__(self, psf=None, pixel_scale=None, pad_image=1.5, catalog=None, sed_list=None,
                  x_size=512, y_size=512, band_name='g', photons_per_jansky=None, obsid=100,
                  ra=None, dec=None, ra_reference=lsst_lon, dec_reference=lsst_lat,
                  sky_rotation=0.0, exposure_time=30.0, saturation_value=65000,
                  background_level=314, **kwargs):
+        """Set up the fixed parameters of the simulation."""
         """
-        Set up the fixed parameters of the simulation.
         @param psf: psf object from Galsim. Needs to have methods getFWHM() and drawImage().
         @param pixel_scale: arcsec/pixel to use for final images.
         @param pad_image: Image size padding factor, to reduce FFT aliasing. Set to 1.0 to tile images.
@@ -122,6 +124,7 @@ class StarSim:
         self.kernel_radius = None
         if psf is not None:
             self.load_psf(psf, **kwargs)
+        self.mask = None
         self.source_model = None
         self.bright_model = None
         self.n_star = None
@@ -136,8 +139,8 @@ class StarSim:
         self.counts_per_jansky = photons_per_jansky / self.photoParams.gain
 
     def load_psf(self, psf, edge_dist=None, _kernel_radius=None, **kwargs):
+        """Load a PSF class from galsim. The class needs to have two methods, getFWHM() and drawImage()."""
         """
-        !Load a PSF class from galsim. The class needs to have two methods, getFWHM() and drawImage().
         @param edge_dist: Number of pixels from the edge of the image to exclude sources. May be negative.
         @param kernel_radius: radius in pixels to use when gridding sources in fast_dft.py.
                               Best to be calculated from psf, unless you know what you are doing!
@@ -156,8 +159,8 @@ class StarSim:
                 self.edge_dist = 5 * psf.getFWHM() * fwhm_to_sigma / CoordsXY.scale()
 
     def load_catalog(self, name=None, sed_list=None, n_star=None, seed=None, **kwargs):
+        """Load or generate a catalog of stars to be used for the simulations."""
         """
-        Load or generate a catalog of stars to be used for the simulations.
         @param name: name of flux entry to use for catalg. Only important for external use of the catalog.
         @param n_star: number of stars to include in the simulated catalog.
         @param seed: random number generator seed value. Allows simulations to be recreated.
@@ -219,8 +222,8 @@ class StarSim:
         CoordsXY.set_y(yv)
 
     def make_reference_catalog(self, output_directory=None, filter_list=None, magnitude_limit=None):
+        """Create a reference catalog and write it to disk."""
         """
-        Create a reference catalog and write it to disk.
         @param output_directory: path to directory where catalog will be saved.
         @param filter_list: list of filters to use to create magnitudes
         @param magnitude_limit: faintest magnitude star to include in the catalog
@@ -324,23 +327,25 @@ class StarSim:
         else:
             bright_image = 0.0
         return_image = (source_image + bright_image) * self.counts_per_jansky + self.background
+        variance = return_image[:, :] / self.photoParams.gain
 
         if photon_noise > 0:
             rand_gen = np.random
             if seed is not None:
                 rand_gen.seed(seed - 1.2)
-            return_image += np.round(np.sqrt(np.abs(return_image))
-                                     * rand_gen.normal(scale=photon_noise, size=return_image.shape))
+            return_image = rand_gen.poisson(variance).astype(float)
         if instrument_noise is None:
             instrument_noise = self.photoParams.readnoise
 
         if instrument_noise > 0:
             rand_gen = np.random
+            variance += instrument_noise
             if seed is not None:
                 rand_gen.seed(seed - 1.1)
             noise_image = rand_gen.normal(scale=instrument_noise, size=return_image.shape)
             return_image += noise_image
-        exposure = self._create_exposure(return_image, elevation=elevation, azimuth=azimuth)
+        exposure = self._create_exposure(return_image, variance=variance,
+                                         elevation=elevation, azimuth=azimuth)
         return(exposure)
 
     def _convolve_subroutine(self, sky_noise_gen, psf=None, verbose=True, bright=False,
@@ -386,66 +391,68 @@ class StarSim:
             CoordsXY.set_oversample(1)
         return(return_image)
 
-    def _create_exposure(self, array, variance=None, elevation=None, azimuth=None):
+    def _create_exposure(self, array, variance=None, elevation=None, azimuth=None, snap=0, **kwargs):
         """Convert a numpy array to an LSST exposure, and units of electron counts."""
-        exposure = afwImage.ExposureF(self.bbox)
+        exposure = afwImage.ExposureD(self.bbox)
         exposure.setWcs(self.wcs)
         # We need the filter name in the exposure metadata, and it can't just be set directly
         try:
-            exposure.setFilter(afwImage.Filter(self.band_name))
+            exposure.setFilter(afwImage.Filter(self.photoParams.bandpass))
         except:
             filterPolicy = pexPolicy.Policy()
             filterPolicy.add("lambdaEff", self.bandpass.calc_eff_wavelen())
-            afwImage.Filter.define(afwImage.FilterProperty(self.band_name, filterPolicy))
-            exposure.setFilter(afwImage.Filter(self.band_name))
+            afwImage.Filter.define(afwImage.FilterProperty(self.photoParams.bandpass, filterPolicy))
+            exposure.setFilter(afwImage.Filter(self.photoParams.bandpass))
+            # Need to reset afwImage.Filter to prevent an error in future calls to daf_persistence.Butler
+            afwImage.FilterProperty_reset()
         calib = afwImage.Calib()
         calib.setExptime(self.photoParams.exptime)
         exposure.setCalib(calib)
+        exposure.setPsf(self._calc_effective_psf(elevation=elevation, azimuth=azimuth, **kwargs))
         exposure.getMaskedImage().getImage().getArray()[:, :] = array
         if variance is None:
             variance = np.abs(array)
         exposure.getMaskedImage().getVariance().getArray()[:, :] = variance
 
-        mask = exposure.getMaskedImage().getMask().getArray()
-        edge_maskval = afwImage.MaskU_getPlaneBitMask("EDGE")
-        edge_mask_dist = np.ceil(self.psf.getFWHM())
-        mask[0: edge_mask_dist, :] = edge_maskval
-        mask[:, 0: edge_mask_dist] = edge_maskval
-        mask[-edge_mask_dist:, :] = edge_maskval
-        mask[:, -edge_mask_dist:] = edge_maskval
-        # # Check for saturation, and mask any saturated pixels
-        # sat_maskval = afwImage.MaskU_getPlaneBitMask("SAT")
-        # if np.max(array) > self.saturation:
-        #     y_sat, x_sat = np.where(array >= self.saturation)
-        #     mask[y_sat, x_sat] += sat_maskval
+        if self.mask is not None:
+            exposure.getMaskedImage().getMask().getArray()[:, :] = self.mask
 
-        hour_angle = (90.0 - elevation) * np.cos(np.radians(azimuth)) / 15.0
-        mjd = 59000.0 + (lsst_lat / 15.0 - hour_angle) / 24.0
+        hour_angle = (90.0 - elevation)*np.cos(np.radians(azimuth))/15.0
+        mjd = 59000.0 + (lsst_lat/15.0 - hour_angle)/24.0
         meta = exposure.getMetadata()
         meta.add("CHIPID", "R22_S11")
         # Required! Phosim output stores the snap ID in "OUTFILE" as the last three characters in a string.
-        meta.add("OUTFILE", "SnapId_000")
+        meta.add("OUTFILE", ("SnapId_%3.3i" % snap))
 
         meta.add("TAI", mjd)
         meta.add("MJD-OBS", mjd)
 
         meta.add("EXTTYPE", "IMAGE")
         meta.add("EXPTIME", 30.0)
-        meta.add("AIRMASS", 1.0 / np.sin(np.radians(elevation)))
+        meta.add("AIRMASS", 1.0/np.sin(np.radians(elevation)))
         meta.add("ZENITH", 90 - elevation)
         meta.add("AZIMUTH", azimuth)
-        # meta.add("FILTER", self.band_name)
-        if self.seed is not None:
-            meta.add("SEED", self.seed)
-        if self.obsid is not None:
-            meta.add("OBSID", self.obsid)
-            self.obsid += 1
+        for add_item in kwargs:
+            meta.add(add_item, kwargs[add_item])
         return(exposure)
+
+    def _calc_effective_psf(self, elevation=None, azimuth=None, psf_size=29, **kwargs):
+        CoordsXY = self.coord
+        dcr_gen = _dcr_generator(self.bandpass, pixel_scale=CoordsXY.scale(),
+                                 elevation=elevation, azimuth=azimuth + self.sky_rotation, **kwargs)
+
+        psf_image = afwImage.ImageD(psf_size, psf_size)
+        for offset in dcr_gen:
+            psf_single = self.psf.drawImage(scale=CoordsXY.scale(), method='fft', offset=offset,
+                                            nx=psf_size, ny=psf_size, use_true_center=False)
+            psf_image.getArray()[:, :] += psf_single.array
+        psfK = afwMath.FixedKernel(psf_image)
+        return(measAlg.KernelPsf(psfK))
 
 
 def _sky_noise_gen(CoordsXY, seed=None, amplitude=None, n_step=1, verbose=False):
+    """Generate random sky noise in Fourier space."""
     """
-    Generate random sky noise in Fourier space.
     @param seed: Random number generator seed value. If None, the current system time will be used.
     @param amplitude: Scale factor of random sky noise, in Jy. If None or <=0, no noise is added.
     @param n_step: Number of sub-band planes used for the simulation. Supplied internally, for normalization.
@@ -558,8 +565,8 @@ def _timing_report(n_star=None, bright=False, timing=None):
 
 
 def _dcr_generator(bandpass, pixel_scale=None, elevation=50.0, azimuth=0.0, **kwargs):
+    """Call the functions that compute Differential Chromatic Refraction (relative to mid-band)."""
     """
-    !Call the functions that compute Differential Chromatic Refraction (relative to mid-band).
     @param bandpass: bandpass object created with load_bandpass
     @param pixel_scale: plate scale in arcsec/pixel
     @param elevation: elevation angle of the center of the image, in decimal degrees.
@@ -759,8 +766,8 @@ def _star_gen(sed_list=None, seed=None, bandpass=None, source_record=None, verbo
 
 def _load_bandpass(band_name='g', wavelength_step=None, use_mirror=True, use_lens=True, use_atmos=True,
                    use_filter=True, use_detector=True, **kwargs):
+    """Load in Bandpass object from sims_photUtils."""
     """
-    !Load in Bandpass object from sims_photUtils.
     @param band_name: Common name of the filter used. For LSST, use u, g, r, i, z, or y
     @param wavelength_step: Wavelength resolution, also the wavelength range of each sub-band plane
     @param use_mirror: Flag, include mirror in filter throughput calculation?
@@ -914,7 +921,8 @@ class StarCatalog:
 class _StellarDistribution():
     def __init__(self, seed=None, n_star=None, hottest_star='A', coolest_star='M',
                  sky_radius=None, wcs=None, verbose=True, **kwargs):
-        """!Function that attempts to return a realistic distribution of stellar properties.
+        """Function that attempts to return a realistic distribution of stellar properties."""
+        """
         Returns temperature, flux, metallicity, surface gravity
         temperature in units Kelvin
         flux in units W/m**2
@@ -953,10 +961,9 @@ class _StellarDistribution():
             metallicity_gen = StarCat.gen_metallicity(star_type, rand_gen=rand_gen, n_star=n_use)
             gravity_gen = StarCat.gen_gravity(star_type, rand_gen=rand_gen, n_star=n_use)
             flux_stars_total = 0.0
-            distance_min = np.sqrt((rand_gen.uniform(min_star_dist, max_star_dist, size=n_use) ** 2.0 +
-                                    rand_gen.uniform(min_star_dist, max_star_dist, size=n_use) ** 2.0))
-            distance_attenuation = (distance_min
-                                    + rand_gen.uniform(0, max_star_dist - min_star_dist, size=n_use))
+            d_min = np.sqrt((rand_gen.uniform(min_star_dist, max_star_dist, size=n_use) ** 2.0 +
+                             rand_gen.uniform(min_star_dist, max_star_dist, size=n_use) ** 2.0))
+            distance_attenuation = (d_min + rand_gen.uniform(0, max_star_dist - min_star_dist, size=n_use))
             star_radial_dist = np.sqrt((rand_gen.uniform(-sky_radius, sky_radius, size=n_use) ** 2.0 +
                                         rand_gen.uniform(-sky_radius, sky_radius, size=n_use) ** 2.0) / 2.0)
             star_angle = rand_gen.uniform(0.0, 2.0 * pi, size=n_use)
@@ -1040,7 +1047,7 @@ class _BasicSED:
         self.flambda = np.arange(wavelen_min, wavelen_max, wavelen_step) / wavelen_max
 
 
-class CoordinatesTestCase(utilsTests.TestCase):
+class CoordinatesTestCase(lsst.utils.tests.TestCase):
     """Test the simple coordinate transformation class."""
 
     def setUp(self):
@@ -1149,7 +1156,7 @@ class CoordinatesTestCase(utilsTests.TestCase):
         self.assertEqual(len(CoordsXY.y_loc(bright=True)), self.n_star)
 
 
-class DCRTestCase(utilsTests.TestCase):
+class DCRTestCase(lsst.utils.tests.TestCase):
     """Test the the calculations of Differential Chromatic Refraction."""
 
     def setUp(self):
@@ -1190,7 +1197,7 @@ class DCRTestCase(utilsTests.TestCase):
             self.assertAlmostEqual(next(dcr_gen)[1], dcr_vals[_i])
 
 
-class BandpassTestCase(utilsTests.TestCase):
+class BandpassTestCase(lsst.utils.tests.TestCase):
     """Tests of the interface to Bandpass from lsst.sims.photUtils."""
 
     def setUp(self):
@@ -1207,7 +1214,7 @@ class BandpassTestCase(utilsTests.TestCase):
         self.assertEqual(n_step + 1, len(bandpass_vals))
 
 
-class StarGenTestCase(utilsTests.TestCase):
+class StarGenTestCase(lsst.utils.tests.TestCase):
     """Test the flux calculation for a single star."""
 
     def setUp(self):
@@ -1258,7 +1265,7 @@ class StarGenTestCase(utilsTests.TestCase):
         self.assertAlmostEqual(abs_diff_spectrum, 0.0)
 
 
-class StellarDistributionTestCase(utilsTests.TestCase):
+class StellarDistributionTestCase(lsst.utils.tests.TestCase):
     """Verify that the random catalog generation is unchanged."""
 
     def setUp(self):
@@ -1315,7 +1322,7 @@ class StellarDistributionTestCase(utilsTests.TestCase):
         self.assertGreaterEqual(np.min(y), 0.0)
 
 
-class SkyNoiseTestCase(utilsTests.TestCase):
+class SkyNoiseTestCase(lsst.utils.tests.TestCase):
     """Verify that the random catalog generation is unchanged."""
 
     def setUp(self):
@@ -1342,24 +1349,14 @@ class SkyNoiseTestCase(utilsTests.TestCase):
         self.assertLess(np.abs(np.std(noise_image) - self.amplitude), 1.0 / dimension)
 
 
-def suite():
-    """Return a suite containing all the test cases in this module."""
-    utilsTests.init()
-
-    suites = []
-    suites += unittest.makeSuite(CoordinatesTestCase)
-    suites += unittest.makeSuite(DCRTestCase)
-    suites += unittest.makeSuite(BandpassTestCase)
-    suites += unittest.makeSuite(StarGenTestCase)
-    suites += unittest.makeSuite(StellarDistributionTestCase)
-    suites += unittest.makeSuite(SkyNoiseTestCase)
-    suites += unittest.makeSuite(utilsTests.MemoryTestCase)
-    return unittest.TestSuite(suites)
+class MemoryTester(lsst.utils.tests.MemoryTestCase):
+    pass
 
 
-def run(shouldExit=False):
-    """Run the tests."""
-    utilsTests.run(suite(), shouldExit)
+def setup_module(module):
+    lsst.utils.tests.init()
+
 
 if __name__ == "__main__":
-    run(True)
+    lsst.utils.tests.init()
+    unittest.main()
