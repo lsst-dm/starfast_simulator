@@ -50,7 +50,9 @@ from scipy import constants
 import lsst.afw.geom as afwGeom
 import lsst.afw.image as afwImage
 import lsst.afw.coord as afwCoord
+import lsst.afw.math as afwMath
 import lsst.afw.table as afwTable
+import lsst.meas.algorithms as measAlg
 import lsst.pex.policy as pexPolicy
 from lsst.sims.photUtils import Bandpass, matchStar, PhotometricParameters
 from lsst.utils import getPackageDir
@@ -122,6 +124,7 @@ class StarSim:
         self.kernel_radius = None
         if psf is not None:
             self.load_psf(psf, **kwargs)
+        self.mask = None
         self.source_model = None
         self.bright_model = None
         self.n_star = None
@@ -324,23 +327,25 @@ class StarSim:
         else:
             bright_image = 0.0
         return_image = (source_image + bright_image) * self.counts_per_jansky + self.background
+        variance = return_image[:, :] / self.photoParams.gain
 
         if photon_noise > 0:
             rand_gen = np.random
             if seed is not None:
                 rand_gen.seed(seed - 1.2)
-            return_image += np.round(np.sqrt(np.abs(return_image))
-                                     * rand_gen.normal(scale=photon_noise, size=return_image.shape))
+            return_image = rand_gen.poisson(variance).astype(float)
         if instrument_noise is None:
             instrument_noise = self.photoParams.readnoise
 
         if instrument_noise > 0:
             rand_gen = np.random
+            variance += instrument_noise
             if seed is not None:
                 rand_gen.seed(seed - 1.1)
             noise_image = rand_gen.normal(scale=instrument_noise, size=return_image.shape)
             return_image += noise_image
-        exposure = self._create_exposure(return_image, elevation=elevation, azimuth=azimuth)
+        exposure = self._create_exposure(return_image, variance=variance,
+                                         elevation=elevation, azimuth=azimuth)
         return(exposure)
 
     def _convolve_subroutine(self, sky_noise_gen, psf=None, verbose=True, bright=False,
@@ -386,61 +391,63 @@ class StarSim:
             CoordsXY.set_oversample(1)
         return(return_image)
 
-    def _create_exposure(self, array, variance=None, elevation=None, azimuth=None):
+    def _create_exposure(self, array, variance=None, elevation=None, azimuth=None, snap=0, **kwargs):
         """Convert a numpy array to an LSST exposure, and units of electron counts."""
-        exposure = afwImage.ExposureF(self.bbox)
+        exposure = afwImage.ExposureD(self.bbox)
         exposure.setWcs(self.wcs)
         # We need the filter name in the exposure metadata, and it can't just be set directly
         try:
-            exposure.setFilter(afwImage.Filter(self.band_name))
+            exposure.setFilter(afwImage.Filter(self.photoParams.bandpass))
         except:
             filterPolicy = pexPolicy.Policy()
             filterPolicy.add("lambdaEff", self.bandpass.calc_eff_wavelen())
-            afwImage.Filter.define(afwImage.FilterProperty(self.band_name, filterPolicy))
-            exposure.setFilter(afwImage.Filter(self.band_name))
+            afwImage.Filter.define(afwImage.FilterProperty(self.photoParams.bandpass, filterPolicy))
+            exposure.setFilter(afwImage.Filter(self.photoParams.bandpass))
+            # Need to reset afwImage.Filter to prevent an error in future calls to daf_persistence.Butler
+            afwImage.FilterProperty_reset()
         calib = afwImage.Calib()
         calib.setExptime(self.photoParams.exptime)
         exposure.setCalib(calib)
+        exposure.setPsf(self._calc_effective_psf(elevation=elevation, azimuth=azimuth, **kwargs))
         exposure.getMaskedImage().getImage().getArray()[:, :] = array
         if variance is None:
             variance = np.abs(array)
         exposure.getMaskedImage().getVariance().getArray()[:, :] = variance
 
-        mask = exposure.getMaskedImage().getMask().getArray()
-        edge_maskval = afwImage.MaskU_getPlaneBitMask("EDGE")
-        edge_mask_dist = np.ceil(self.psf.getFWHM())
-        mask[0: edge_mask_dist, :] = edge_maskval
-        mask[:, 0: edge_mask_dist] = edge_maskval
-        mask[-edge_mask_dist:, :] = edge_maskval
-        mask[:, -edge_mask_dist:] = edge_maskval
-        # # Check for saturation, and mask any saturated pixels
-        # sat_maskval = afwImage.MaskU_getPlaneBitMask("SAT")
-        # if np.max(array) > self.saturation:
-        #     y_sat, x_sat = np.where(array >= self.saturation)
-        #     mask[y_sat, x_sat] += sat_maskval
+        if self.mask is not None:
+            exposure.getMaskedImage().getMask().getArray()[:, :] = self.mask
 
-        hour_angle = (90.0 - elevation) * np.cos(np.radians(azimuth)) / 15.0
-        mjd = 59000.0 + (lsst_lat / 15.0 - hour_angle) / 24.0
+        hour_angle = (90.0 - elevation)*np.cos(np.radians(azimuth))/15.0
+        mjd = 59000.0 + (lsst_lat/15.0 - hour_angle)/24.0
         meta = exposure.getMetadata()
         meta.add("CHIPID", "R22_S11")
         # Required! Phosim output stores the snap ID in "OUTFILE" as the last three characters in a string.
-        meta.add("OUTFILE", "SnapId_000")
+        meta.add("OUTFILE", ("SnapId_%3.3i" % snap))
 
         meta.add("TAI", mjd)
         meta.add("MJD-OBS", mjd)
 
         meta.add("EXTTYPE", "IMAGE")
         meta.add("EXPTIME", 30.0)
-        meta.add("AIRMASS", 1.0 / np.sin(np.radians(elevation)))
+        meta.add("AIRMASS", 1.0/np.sin(np.radians(elevation)))
         meta.add("ZENITH", 90 - elevation)
         meta.add("AZIMUTH", azimuth)
-        # meta.add("FILTER", self.band_name)
-        if self.seed is not None:
-            meta.add("SEED", self.seed)
-        if self.obsid is not None:
-            meta.add("OBSID", self.obsid)
-            self.obsid += 1
+        for add_item in kwargs:
+            meta.add(add_item, kwargs[add_item])
         return(exposure)
+
+    def _calc_effective_psf(self, elevation=None, azimuth=None, psf_size=29, **kwargs):
+        CoordsXY = self.coord
+        dcr_gen = _dcr_generator(self.bandpass, pixel_scale=CoordsXY.scale(),
+                                 elevation=elevation, azimuth=azimuth + self.sky_rotation, **kwargs)
+
+        psf_image = afwImage.ImageD(psf_size, psf_size)
+        for offset in dcr_gen:
+            psf_single = self.psf.drawImage(scale=CoordsXY.scale(), method='fft', offset=offset,
+                                            nx=psf_size, ny=psf_size, use_true_center=False)
+            psf_image.getArray()[:, :] += psf_single.array
+        psfK = afwMath.FixedKernel(psf_image)
+        return(measAlg.KernelPsf(psfK))
 
 
 def _sky_noise_gen(CoordsXY, seed=None, amplitude=None, n_step=1, verbose=False):
