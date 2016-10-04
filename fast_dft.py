@@ -37,12 +37,12 @@ each with n different amplitude values. In this case, a n element list of MxN im
 from __future__ import division
 import numpy as np
 import unittest
-import lsst.utils.tests as utilsTests
+import lsst.utils.tests
 
 
 def fast_dft(amplitudes, x_loc, y_loc, x_size=None, y_size=None, no_fft=True, kernel_radius=10, **kwargs):
+    """Construct a gridded 2D Fourier transform of an array of amplitudes at floating-point locations."""
     """
-    !Construct a gridded 2D Fourier transform of an array of amplitudes at floating-point locations.
     @param amplitudes: Either a 1D floating point array of amplitudes for each x_loc and y_loc,
                        or a 2D floating point array with a vector of values for each x_loc and y_loc
     @param x_loc: 1D floating point array of x pixel coordinates.
@@ -57,6 +57,7 @@ def fast_dft(amplitudes, x_loc, y_loc, x_size=None, y_size=None, no_fft=True, ke
              if amplitudes is 2D, a list of numpy ndarrays as above
     """
     pi = np.pi
+    kernel_radius = int(kernel_radius)
 
     amplitudes = input_type_check(amplitudes)
     x_loc = input_type_check(x_loc)
@@ -150,9 +151,8 @@ def fast_dft(amplitudes, x_loc, y_loc, x_size=None, y_size=None, no_fft=True, ke
 
 
 def kernel_1d(locs, size):
+    """Pre-compute the 1D sinc function values along each axis."""
     """
-    pre-compute the 1D sinc function values along each axis.
-
     @param locs: pixel coordinates of dft locations along single axis (either x or y)
     @params size: dimension in pixels of the given axis
     """
@@ -171,9 +171,8 @@ def kernel_1d(locs, size):
 
 
 def kernel_1d_gen(locs, size):
+    """A generalized generator function that pre-computes the 1D sinc function values along one axis."""
     """
-    A generalized generator function that pre-computes the 1D sinc function values along one axis.
-
     @param locs: pixel coordinates of dft locations along single axis (either x or y)
     @params size: dimension in pixels of the given axis
     @return: yields the sinc interpolation along a single axis for each loc
@@ -194,8 +193,8 @@ def kernel_1d_gen(locs, size):
 
 
 def kernel_circle_inds(x_loc, y_loc, x_size=None, y_size=None, kernel_radius=None):
+        """A generator function that pre-computes the pixels to use for gridding."""
         """
-        A generator function that pre-computes the pixels to use for gridding.
         Returns the x and y indices for all pixels within a given radius of a location,
         that are NOT included in slices centered on that location.
         Also applies a Hanning window function for those values, to reduce ringing at the edges.
@@ -257,7 +256,7 @@ def input_type_check(var):
 # -=-=-=-=-=-=-=-=-=-=-=-=-=-=-=-=-=-=-=-=-=-=-=-=-=-=-=-=-=-=-=-=-=-=-=-=-=-=-=-
 
 
-class SingleSourceTestCase(utilsTests.TestCase):
+class SingleSourceTestCase(lsst.utils.tests.TestCase):
     """Lightweight unit test cases using a single star and a small image."""
 
     def setUp(self):
@@ -272,15 +271,6 @@ class SingleSourceTestCase(utilsTests.TestCase):
         flux_arr = np.zeros((n_star, n_band))
         flux_arr[0, :] = np.arange(n_band) / 10.0 + 1.0
         self.amplitudes = flux_arr
-
-    def tearDown(self):
-        """Clean up."""
-        del self.x_size
-        del self.y_size
-        del self.x_loc
-        del self.y_loc
-        del self.radius
-        del self.amplitudes
 
     def test_single_source(self):
         """Test a single star with a single wavelength slice."""
@@ -315,7 +305,7 @@ class SingleSourceTestCase(utilsTests.TestCase):
         self.assertAlmostEqual(abs_diff_sum, 0.0)
 
 
-class MultipleSourceTestCase(utilsTests.TestCase):
+class MultipleSourceTestCase(lsst.utils.tests.TestCase):
     """Larger test case intended for profiling and accurate timing."""
 
     def setUp(self):
@@ -334,15 +324,6 @@ class MultipleSourceTestCase(utilsTests.TestCase):
         for _i in range(n_star):
             flux_arr[_i, :] = np.abs(np.arange(n_band)**2.0 / 10.0 + rand_gen.normal(scale=10.0))
         self.amplitudes = flux_arr
-
-    def tearDown(self):
-        """Clean up."""
-        del self.x_size
-        del self.y_size
-        del self.x_loc
-        del self.y_loc
-        del self.radius
-        del self.amplitudes
 
     def test_continuum_source(self):
         """Test stars with a single wavelength slice."""
@@ -377,20 +358,14 @@ class MultipleSourceTestCase(utilsTests.TestCase):
         self.assertAlmostEqual(abs_diff_sum, 0.0)
 
 
-def suite():
-    """Return a suite containing all the test cases in this module."""
-    utilsTests.init()
-
-    suites = []
-    suites += unittest.makeSuite(SingleSourceTestCase)
-    suites += unittest.makeSuite(MultipleSourceTestCase)
-    suites += unittest.makeSuite(utilsTests.MemoryTestCase)
-    return unittest.TestSuite(suites)
+class MemoryTester(lsst.utils.tests.MemoryTestCase):
+    pass
 
 
-def run(shouldExit=False):
-    """Run the tests."""
-    utilsTests.run(suite(), shouldExit)
+def setup_module(module):
+    lsst.utils.tests.init()
+
 
 if __name__ == "__main__":
-    run(True)
+    lsst.utils.tests.init()
+    unittest.main()
