@@ -49,9 +49,12 @@ import os
 from scipy import constants
 import lsst.afw.geom as afwGeom
 import lsst.afw.image as afwImage
-import lsst.afw.coord as afwCoord
+# import lsst.afw.coord as afwCoord
+from lsst.afw.coord import Coord, IcrsCoord, Observatory
+from lsst.afw.geom import Angle
 import lsst.afw.math as afwMath
 import lsst.afw.table as afwTable
+from lsst.daf.base import DateTime
 import lsst.meas.algorithms as measAlg
 import lsst.pex.policy as pexPolicy
 from lsst.sims.photUtils import Bandpass, matchStar, PhotometricParameters
@@ -62,8 +65,11 @@ import time
 import unittest
 import lsst.utils.tests
 
-lsst_lat = -30.244639
-lsst_lon = -70.749417
+nanFloat = float("nan")
+nanAngle = Angle(nanFloat)
+lsst_lat = Angle(np.radians(-30.244639))
+lsst_lon = Angle(np.radians(-70.749417))
+lsst_alt = 2663.
 
 
 class StarSim:
@@ -111,13 +117,15 @@ class StarSim:
         self.coord = _CoordsXY(pixel_scale=self.photoParams.platescale, pad_image=pad_image,
                                x_size=x_size, y_size=y_size)
         self.bbox = afwGeom.Box2I(afwGeom.Point2I(0, 0), afwGeom.ExtentI(x_size, y_size))
-        self.wcs = _create_wcs(pixel_scale=self.coord.scale(), bbox=self.bbox,
-                               ra=ra, dec=dec, sky_rotation=sky_rotation)
         self.sky_rotation = sky_rotation
         if ra is None:
             ra = ra_reference
         if dec is None:
             dec = dec_reference
+        self.ra = ra
+        self.dec = dec
+        self.wcs = _create_wcs(pixel_scale=self.coord.scale(), bbox=self.bbox,
+                               ra=ra, dec=dec, sky_rotation=sky_rotation)
         self._wcs_ref = _create_wcs(pixel_scale=self.coord.scale(), bbox=self.bbox,
                                     ra=ra_reference, dec=dec_reference, sky_rotation=0.0)
         self.edge_dist = None
@@ -344,8 +352,8 @@ class StarSim:
                 rand_gen.seed(seed - 1.1)
             noise_image = rand_gen.normal(scale=instrument_noise, size=return_image.shape)
             return_image += noise_image
-        exposure = self._create_exposure(return_image, variance=variance,
-                                         elevation=elevation, azimuth=azimuth)
+        exposure = self._create_exposure(return_image, variance=variance, boresightRotAngle=self.sky_rotation,
+                                         ra=self.ra, dec=self.dec, elevation=elevation, azimuth=azimuth)
         return(exposure)
 
     def _convolve_subroutine(self, sky_noise_gen, psf=None, verbose=True, bright=False,
@@ -391,8 +399,20 @@ class StarSim:
             CoordsXY.set_oversample(1)
         return(return_image)
 
-    def _create_exposure(self, array, variance=None, elevation=None, azimuth=None, snap=0, **kwargs):
-        """Convert a numpy array to an LSST exposure, and units of electron counts."""
+    def _create_exposure(self, array, variance=None, elevation=None, azimuth=None, snap=0,
+                         exposureId=0, ra=nanAngle, dec=nanAngle, boresightRotAngle=nanAngle, **kwargs):
+        """Convert a numpy array to an LSST exposure, and units of electron counts.
+
+        @param array: numpy array to use as the data for the exposure
+        @param variance: optional numpy array to use as the variance plane of the exposure.
+                         If None, the absoulte value of 'array' is used for the variance plane.
+        @param elevation: Elevation angle of the observation, in degrees.
+        @param azimuth: Azimuth angle of the observation, in degrees.
+        @param snap: snap ID to add to the metadata of the exposure. Required to mimic Phosim output.
+        @param exposureId: observation ID of the exposure, a long int.
+        @param **kwargs: Any additional keyword arguments will be added to the metadata of the exposure.
+        @return Returns an LSST exposure.
+        """
         exposure = afwImage.ExposureD(self.bbox)
         exposure.setWcs(self.wcs)
         # We need the filter name in the exposure metadata, and it can't just be set directly
@@ -405,9 +425,6 @@ class StarSim:
             exposure.setFilter(afwImage.Filter(self.photoParams.bandpass))
             # Need to reset afwImage.Filter to prevent an error in future calls to daf_persistence.Butler
             afwImage.FilterProperty_reset()
-        calib = afwImage.Calib()
-        calib.setExptime(self.photoParams.exptime)
-        exposure.setCalib(calib)
         exposure.setPsf(self._calc_effective_psf(elevation=elevation, azimuth=azimuth, **kwargs))
         exposure.getMaskedImage().getImage().getArray()[:, :] = array
         if variance is None:
@@ -418,7 +435,8 @@ class StarSim:
             exposure.getMaskedImage().getMask().getArray()[:, :] = self.mask
 
         hour_angle = (90.0 - elevation)*np.cos(np.radians(azimuth))/15.0
-        mjd = 59000.0 + (lsst_lat/15.0 - hour_angle)/24.0
+        mjd = 59000.0 + (lsst_lat.asDegrees()/15.0 - hour_angle)/24.0
+        airmass = 1.0/np.sin(np.radians(elevation))
         meta = exposure.getMetadata()
         meta.add("CHIPID", "R22_S11")
         # Required! Phosim output stores the snap ID in "OUTFILE" as the last three characters in a string.
@@ -429,12 +447,26 @@ class StarSim:
 
         meta.add("EXTTYPE", "IMAGE")
         meta.add("EXPTIME", 30.0)
-        meta.add("AIRMASS", 1.0/np.sin(np.radians(elevation)))
+        meta.add("AIRMASS", airmass)
         meta.add("ZENITH", 90 - elevation)
         meta.add("AZIMUTH", azimuth)
+        # Add all additional keyword arguments to the metadata.
         for add_item in kwargs:
             meta.add(add_item, kwargs[add_item])
-        return(exposure)
+
+        visitInfo = afwImage.makeVisitInfo(
+            exposureId=int(exposureId),
+            exposureTime=30.0,
+            darkTime=30.0,
+            date=DateTime(mjd),
+            ut1=mjd,
+            boresightRaDec=IcrsCoord(ra, dec),
+            boresightAzAlt=Coord(Angle(np.radians(azimuth)), Angle(np.radians(elevation))),
+            boresightAirmass=airmass,
+            boresightRotAngle=Angle(np.radians(boresightRotAngle)),
+            observatory=Observatory(lsst_lon, lsst_lat, lsst_alt),)
+        exposure.getInfo().setVisitInfo(visitInfo)
+        return exposure
 
     def _calc_effective_psf(self, elevation=None, azimuth=None, psf_size=29, **kwargs):
         CoordsXY = self.coord
@@ -543,7 +575,7 @@ class _CoordsXY:
 
 def _create_wcs(bbox=None, pixel_scale=None, ra=None, dec=None, sky_rotation=None):
     """Create a wcs (coordinate system)."""
-    crval = afwCoord.IcrsCoord(ra * afwGeom.degrees, dec * afwGeom.degrees)
+    crval = IcrsCoord(ra, dec)
     crpix = afwGeom.Box2D(bbox).getCenter()
     cd1_1 = (pixel_scale * afwGeom.arcseconds * np.cos(np.radians(sky_rotation))).asDegrees()
     cd1_2 = (-pixel_scale * afwGeom.arcseconds * np.sin(np.radians(sky_rotation))).asDegrees()
