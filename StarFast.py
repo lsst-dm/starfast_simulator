@@ -1,4 +1,5 @@
 #
+
 # LSST Data Management System
 # Copyright 2016 LSST Corporation.
 #
@@ -140,9 +141,9 @@ class StarSim:
         self.background = background_level  # in counts
         self.obsid = obsid  # observation number used when persisting images
         if photons_per_jansky is None:
-            photon_energy = constants.Planck * constants.speed_of_light / (bandpass.calc_eff_wavelen() / 1e9)
-            photons_per_jansky = (1e-26 * (self.photoParams.effarea / 1e4)
-                                  * bandpass.calc_bandwidth() / photon_energy)
+            photon_energy = constants.Planck*constants.speed_of_light/(bandpass.calc_eff_wavelen()/1e9)
+            photons_per_jansky = (1e-26 * (self.photoParams.effarea / 1e4) *
+                                  bandpass.calc_bandwidth() / photon_energy)
 
         self.counts_per_jansky = photons_per_jansky / self.photoParams.gain
 
@@ -211,8 +212,8 @@ class StarSim:
             flux_arr[_i, :] = np.array([flux_val for flux_val in star_spectrum])
         flux_tot = np.sum(flux_arr, axis=1)
         if n_star > 3:
-            cat_sigma = np.std(flux_tot[flux_tot - np.median(flux_tot)
-                                        < bright_sigma_threshold * np.std(flux_tot)])
+            cat_sigma = np.std(flux_tot[flux_tot - np.median(flux_tot) <
+                                        bright_sigma_threshold * np.std(flux_tot)])
             bright_inds = (np.where(flux_tot - np.median(flux_tot) > bright_sigma_threshold * cat_sigma))[0]
             if len(bright_inds) > 0:
                 flux_faint = np.sum(flux_arr) - np.sum(flux_tot[bright_inds])
@@ -353,7 +354,7 @@ class StarSim:
             noise_image = rand_gen.normal(scale=instrument_noise, size=return_image.shape)
             return_image += noise_image
         exposure = self.create_exposure(return_image, variance=variance, boresightRotAngle=self.sky_rotation,
-                                         ra=self.ra, dec=self.dec, elevation=elevation, azimuth=azimuth)
+                                        ra=self.ra, dec=self.dec, elevation=elevation, azimuth=azimuth)
         return(exposure)
 
     def _convolve_subroutine(self, sky_noise_gen, psf=None, verbose=True, bright=False,
@@ -500,8 +501,8 @@ def _sky_noise_gen(CoordsXY, seed=None, amplitude=None, n_step=1, verbose=False)
         x_size_use = CoordsXY.xsize() // 2 + 1
         amplitude_use = amplitude / (np.sqrt(n_step / (x_size_use * y_size_use)))
         for _i in range(n_step):
-            rand_fft = (rand_gen.normal(scale=amplitude_use, size=(y_size_use, x_size_use))
-                        + 1j * rand_gen.normal(scale=amplitude_use, size=(y_size_use, x_size_use)))
+            rand_fft = (rand_gen.normal(scale=amplitude_use, size=(y_size_use, x_size_use)) +
+                        1j * rand_gen.normal(scale=amplitude_use, size=(y_size_use, x_size_use)))
             yield(rand_fft)
 
 
@@ -749,13 +750,13 @@ def _star_gen(sed_list=None, seed=None, bandpass=None, source_record=None, verbo
         # integral over the full bandpass, to convert back to astrophysical quantities
         sed_band_integral = 0.0
         for wave_start, wave_end in _wavelength_iterator(bandpass):
-            sed_band_integral += (next(bandpass_gen2)
-                                  * sed_integrate(wave_start=wave_start, wave_end=wave_end))
+            sed_band_integral += (next(bandpass_gen2) *
+                                  sed_integrate(wave_start=wave_start, wave_end=wave_end))
         flux_band_norm = flux_to_jansky * flux_raw * flux_band_fraction / bandwidth_hz
 
         for wave_start, wave_end in _wavelength_iterator(bandpass):
-            yield(flux_band_norm * next(bandpass_gen)
-                  * sed_integrate(wave_start=wave_start, wave_end=wave_end) / sed_band_integral)
+            yield(flux_band_norm * next(bandpass_gen) *
+                  sed_integrate(wave_start=wave_start, wave_end=wave_end) / sed_band_integral)
 
     else:
         h = constants.Planck
@@ -792,8 +793,8 @@ def _star_gen(sed_list=None, seed=None, bandpass=None, source_record=None, verbo
         flux_band_norm = flux_to_jansky * flux_raw * flux_band_fraction / bandwidth_hz
 
         for wave_start, wave_end in _wavelength_iterator(bandpass):
-            yield(flux_band_norm * next(bandpass_gen)
-                  * radiance_calc(wave_start, wave_end) / radiance_band_integral)
+            yield(flux_band_norm * next(bandpass_gen) *
+                  radiance_calc(wave_start, wave_end) / radiance_band_integral)
 
 
 def _load_bandpass(band_name='g', wavelength_step=None, use_mirror=True, use_lens=True, use_atmos=True,
@@ -1382,10 +1383,13 @@ class SkyNoiseTestCase(lsst.utils.tests.TestCase):
 
 
 class MemoryTester(lsst.utils.tests.MemoryTestCase):
+    """Temp."""
+
     pass
 
 
 def setup_module(module):
+    """Temp."""
     lsst.utils.tests.init()
 
 
