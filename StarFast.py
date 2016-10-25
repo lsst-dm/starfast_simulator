@@ -352,7 +352,7 @@ class StarSim:
                 rand_gen.seed(seed - 1.1)
             noise_image = rand_gen.normal(scale=instrument_noise, size=return_image.shape)
             return_image += noise_image
-        exposure = self._create_exposure(return_image, variance=variance, boresightRotAngle=self.sky_rotation,
+        exposure = self.create_exposure(return_image, variance=variance, boresightRotAngle=self.sky_rotation,
                                          ra=self.ra, dec=self.dec, elevation=elevation, azimuth=azimuth)
         return(exposure)
 
@@ -399,8 +399,8 @@ class StarSim:
             CoordsXY.set_oversample(1)
         return(return_image)
 
-    def _create_exposure(self, array, variance=None, elevation=None, azimuth=None, snap=0,
-                         exposureId=0, ra=nanAngle, dec=nanAngle, boresightRotAngle=nanAngle, **kwargs):
+    def create_exposure(self, array, variance=None, elevation=None, azimuth=None, snap=0,
+                        exposureId=0, ra=nanAngle, dec=nanAngle, boresightRotAngle=nanAngle, **kwargs):
         """Convert a numpy array to an LSST exposure, and units of electron counts.
 
         @param array: numpy array to use as the data for the exposure
@@ -434,9 +434,9 @@ class StarSim:
         if self.mask is not None:
             exposure.getMaskedImage().getMask().getArray()[:, :] = self.mask
 
-        hour_angle = (90.0 - elevation)*np.cos(np.radians(azimuth))/15.0
+        hour_angle = (90.0 - elevation.asDegrees())*np.cos(azimuth.asRadians())/15.0
         mjd = 59000.0 + (lsst_lat.asDegrees()/15.0 - hour_angle)/24.0
-        airmass = 1.0/np.sin(np.radians(elevation))
+        airmass = 1.0/np.sin(elevation.asRadians())
         meta = exposure.getMetadata()
         meta.add("CHIPID", "R22_S11")
         # Required! Phosim output stores the snap ID in "OUTFILE" as the last three characters in a string.
