@@ -1,4 +1,5 @@
 #
+
 # LSST Data Management System
 # Copyright 2016 LSST Corporation.
 #
@@ -49,9 +50,12 @@ import os
 from scipy import constants
 import lsst.afw.geom as afwGeom
 import lsst.afw.image as afwImage
-import lsst.afw.coord as afwCoord
+# import lsst.afw.coord as afwCoord
+from lsst.afw.coord import Coord, IcrsCoord, Observatory
+from lsst.afw.geom import Angle
 import lsst.afw.math as afwMath
 import lsst.afw.table as afwTable
+from lsst.daf.base import DateTime
 import lsst.meas.algorithms as measAlg
 import lsst.pex.policy as pexPolicy
 from lsst.sims.photUtils import Bandpass, matchStar, PhotometricParameters
@@ -62,15 +66,18 @@ import time
 import unittest
 import lsst.utils.tests
 
-lsst_lat = -30.244639
-lsst_lon = -70.749417
+nanFloat = float("nan")
+nanAngle = Angle(nanFloat)
+lsst_lat = Angle(np.radians(-30.244639))
+lsst_lon = Angle(np.radians(-70.749417))
+lsst_alt = 2663.
 
 
 class StarSim:
     """Class that defines a random simulated region of sky, and allows fast transformations."""
 
     def __init__(self, psf=None, pixel_scale=None, pad_image=1.5, catalog=None, sed_list=None,
-                 x_size=512, y_size=512, band_name='g', photons_per_jansky=None, obsid=100,
+                 x_size=512, y_size=512, band_name='g', photons_per_jansky=None, 
                  ra=None, dec=None, ra_reference=lsst_lon, dec_reference=lsst_lat,
                  sky_rotation=0.0, exposure_time=30.0, saturation_value=65000,
                  background_level=314, **kwargs):
@@ -86,7 +93,6 @@ class StarSim:
         @param y_size: Number of pixels on the y-axis
         @param band_name: Common name of the filter used. For LSST, use u, g, r, i, z, or y
         @param photons_per_jansky: Conversion factor between Jansky units and photons
-        @param obsid: unique identificatin number for different runs of the same simulation.
         @param ra: Right Ascension of the center of the simulation. Used only for the wcs of output fits files
         @param dec: Declination of the center of the simulation. Used only for the wcs of output fits files.
         @param ra_reference: Right Ascension of the center of the field for the reference catalog
@@ -111,13 +117,15 @@ class StarSim:
         self.coord = _CoordsXY(pixel_scale=self.photoParams.platescale, pad_image=pad_image,
                                x_size=x_size, y_size=y_size)
         self.bbox = afwGeom.Box2I(afwGeom.Point2I(0, 0), afwGeom.ExtentI(x_size, y_size))
-        self.wcs = _create_wcs(pixel_scale=self.coord.scale(), bbox=self.bbox,
-                               ra=ra, dec=dec, sky_rotation=sky_rotation)
         self.sky_rotation = sky_rotation
         if ra is None:
             ra = ra_reference
         if dec is None:
             dec = dec_reference
+        self.ra = ra
+        self.dec = dec
+        self.wcs = _create_wcs(pixel_scale=self.coord.scale(), bbox=self.bbox,
+                               ra=ra, dec=dec, sky_rotation=sky_rotation)
         self._wcs_ref = _create_wcs(pixel_scale=self.coord.scale(), bbox=self.bbox,
                                     ra=ra_reference, dec=dec_reference, sky_rotation=0.0)
         self.edge_dist = None
@@ -130,11 +138,10 @@ class StarSim:
         self.n_star = None
         self.saturation = saturation_value  # in counts
         self.background = background_level  # in counts
-        self.obsid = obsid  # observation number used when persisting images
         if photons_per_jansky is None:
-            photon_energy = constants.Planck * constants.speed_of_light / (bandpass.calc_eff_wavelen() / 1e9)
-            photons_per_jansky = (1e-26 * (self.photoParams.effarea / 1e4)
-                                  * bandpass.calc_bandwidth() / photon_energy)
+            photon_energy = constants.Planck*constants.speed_of_light/(bandpass.calc_eff_wavelen()/1e9)
+            photons_per_jansky = (1e-26 * (self.photoParams.effarea / 1e4) *
+                                  bandpass.calc_bandwidth() / photon_energy)
 
         self.counts_per_jansky = photons_per_jansky / self.photoParams.gain
 
@@ -203,8 +210,8 @@ class StarSim:
             flux_arr[_i, :] = np.array([flux_val for flux_val in star_spectrum])
         flux_tot = np.sum(flux_arr, axis=1)
         if n_star > 3:
-            cat_sigma = np.std(flux_tot[flux_tot - np.median(flux_tot)
-                                        < bright_sigma_threshold * np.std(flux_tot)])
+            cat_sigma = np.std(flux_tot[flux_tot - np.median(flux_tot) <
+                                        bright_sigma_threshold * np.std(flux_tot)])
             bright_inds = (np.where(flux_tot - np.median(flux_tot) > bright_sigma_threshold * cat_sigma))[0]
             if len(bright_inds) > 0:
                 flux_faint = np.sum(flux_arr) - np.sum(flux_tot[bright_inds])
@@ -311,8 +318,11 @@ class StarSim:
                 print(_timing_report(n_star=n_bright, bright=True, timing=timing_model))
 
     def convolve(self, seed=None, sky_noise=0, instrument_noise=0, photon_noise=0, verbose=True,
-                 elevation=None, azimuth=None, **kwargs):
-        """Convolve a simulated sky with a given PSF. Returns an LSST exposure."""
+                 elevation=None, azimuth=None, exposureId=None, **kwargs):
+        """Convolve a simulated sky with a given PSF. Returns an LSST exposure.
+
+        @param exposureId: unique identificatin number for different runs of the same simulation.
+        """
         CoordsXY = self.coord
         sky_noise_gen = _sky_noise_gen(CoordsXY, seed=seed, amplitude=sky_noise,
                                        n_step=self.n_step, verbose=verbose)
@@ -327,13 +337,14 @@ class StarSim:
         else:
             bright_image = 0.0
         return_image = (source_image + bright_image) * self.counts_per_jansky + self.background
-        variance = return_image[:, :] / self.photoParams.gain
+        variance = return_image[:, :]
 
         if photon_noise > 0:
             rand_gen = np.random
             if seed is not None:
                 rand_gen.seed(seed - 1.2)
-            return_image = rand_gen.poisson(variance).astype(float)
+            photon_scale = self.photoParams.gain/photon_noise
+            return_image = np.round(rand_gen.poisson(variance*photon_scale)/photon_scale)
         if instrument_noise is None:
             instrument_noise = self.photoParams.readnoise
 
@@ -344,8 +355,9 @@ class StarSim:
                 rand_gen.seed(seed - 1.1)
             noise_image = rand_gen.normal(scale=instrument_noise, size=return_image.shape)
             return_image += noise_image
-        exposure = self._create_exposure(return_image, variance=variance,
-                                         elevation=elevation, azimuth=azimuth)
+        exposure = self.create_exposure(return_image, variance=variance, boresightRotAngle=self.sky_rotation,
+                                        ra=self.ra, dec=self.dec, elevation=elevation, azimuth=azimuth,
+                                        exposureId=exposureId, **kwargs)
         return(exposure)
 
     def _convolve_subroutine(self, sky_noise_gen, psf=None, verbose=True, bright=False,
@@ -391,8 +403,20 @@ class StarSim:
             CoordsXY.set_oversample(1)
         return(return_image)
 
-    def _create_exposure(self, array, variance=None, elevation=None, azimuth=None, snap=0, **kwargs):
-        """Convert a numpy array to an LSST exposure, and units of electron counts."""
+    def create_exposure(self, array, variance=None, elevation=None, azimuth=None, snap=0,
+                        exposureId=0, ra=nanAngle, dec=nanAngle, boresightRotAngle=nanAngle, **kwargs):
+        """Convert a numpy array to an LSST exposure, and units of electron counts.
+
+        @param array: numpy array to use as the data for the exposure
+        @param variance: optional numpy array to use as the variance plane of the exposure.
+                         If None, the absoulte value of 'array' is used for the variance plane.
+        @param elevation: Elevation angle of the observation, in degrees.
+        @param azimuth: Azimuth angle of the observation, in degrees.
+        @param snap: snap ID to add to the metadata of the exposure. Required to mimic Phosim output.
+        @param exposureId: observation ID of the exposure, a long int.
+        @param **kwargs: Any additional keyword arguments will be added to the metadata of the exposure.
+        @return Returns an LSST exposure.
+        """
         exposure = afwImage.ExposureD(self.bbox)
         exposure.setWcs(self.wcs)
         # We need the filter name in the exposure metadata, and it can't just be set directly
@@ -405,9 +429,6 @@ class StarSim:
             exposure.setFilter(afwImage.Filter(self.photoParams.bandpass))
             # Need to reset afwImage.Filter to prevent an error in future calls to daf_persistence.Butler
             afwImage.FilterProperty_reset()
-        calib = afwImage.Calib()
-        calib.setExptime(self.photoParams.exptime)
-        exposure.setCalib(calib)
         exposure.setPsf(self._calc_effective_psf(elevation=elevation, azimuth=azimuth, **kwargs))
         exposure.getMaskedImage().getImage().getArray()[:, :] = array
         if variance is None:
@@ -418,7 +439,8 @@ class StarSim:
             exposure.getMaskedImage().getMask().getArray()[:, :] = self.mask
 
         hour_angle = (90.0 - elevation)*np.cos(np.radians(azimuth))/15.0
-        mjd = 59000.0 + (lsst_lat/15.0 - hour_angle)/24.0
+        mjd = 59000.0 + (lsst_lat.asDegrees()/15.0 - hour_angle)/24.0
+        airmass = 1.0/np.sin(np.radians(elevation))
         meta = exposure.getMetadata()
         meta.add("CHIPID", "R22_S11")
         # Required! Phosim output stores the snap ID in "OUTFILE" as the last three characters in a string.
@@ -429,12 +451,26 @@ class StarSim:
 
         meta.add("EXTTYPE", "IMAGE")
         meta.add("EXPTIME", 30.0)
-        meta.add("AIRMASS", 1.0/np.sin(np.radians(elevation)))
+        meta.add("AIRMASS", airmass)
         meta.add("ZENITH", 90 - elevation)
         meta.add("AZIMUTH", azimuth)
+        # Add all additional keyword arguments to the metadata.
         for add_item in kwargs:
             meta.add(add_item, kwargs[add_item])
-        return(exposure)
+
+        visitInfo = afwImage.makeVisitInfo(
+            exposureId=int(exposureId),
+            exposureTime=30.0,
+            darkTime=30.0,
+            date=DateTime(mjd),
+            ut1=mjd,
+            boresightRaDec=IcrsCoord(ra, dec),
+            boresightAzAlt=Coord(Angle(np.radians(azimuth)), Angle(np.radians(elevation))),
+            boresightAirmass=airmass,
+            boresightRotAngle=Angle(np.radians(boresightRotAngle)),
+            observatory=Observatory(lsst_lon, lsst_lat, lsst_alt),)
+        exposure.getInfo().setVisitInfo(visitInfo)
+        return exposure
 
     def _calc_effective_psf(self, elevation=None, azimuth=None, psf_size=29, **kwargs):
         CoordsXY = self.coord
@@ -468,8 +504,8 @@ def _sky_noise_gen(CoordsXY, seed=None, amplitude=None, n_step=1, verbose=False)
         x_size_use = CoordsXY.xsize() // 2 + 1
         amplitude_use = amplitude / (np.sqrt(n_step / (x_size_use * y_size_use)))
         for _i in range(n_step):
-            rand_fft = (rand_gen.normal(scale=amplitude_use, size=(y_size_use, x_size_use))
-                        + 1j * rand_gen.normal(scale=amplitude_use, size=(y_size_use, x_size_use)))
+            rand_fft = (rand_gen.normal(scale=amplitude_use, size=(y_size_use, x_size_use)) +
+                        1j * rand_gen.normal(scale=amplitude_use, size=(y_size_use, x_size_use)))
             yield(rand_fft)
 
 
@@ -543,7 +579,7 @@ class _CoordsXY:
 
 def _create_wcs(bbox=None, pixel_scale=None, ra=None, dec=None, sky_rotation=None):
     """Create a wcs (coordinate system)."""
-    crval = afwCoord.IcrsCoord(ra * afwGeom.degrees, dec * afwGeom.degrees)
+    crval = IcrsCoord(ra, dec)
     crpix = afwGeom.Box2D(bbox).getCenter()
     cd1_1 = (pixel_scale * afwGeom.arcseconds * np.cos(np.radians(sky_rotation))).asDegrees()
     cd1_2 = (-pixel_scale * afwGeom.arcseconds * np.sin(np.radians(sky_rotation))).asDegrees()
@@ -717,13 +753,13 @@ def _star_gen(sed_list=None, seed=None, bandpass=None, source_record=None, verbo
         # integral over the full bandpass, to convert back to astrophysical quantities
         sed_band_integral = 0.0
         for wave_start, wave_end in _wavelength_iterator(bandpass):
-            sed_band_integral += (next(bandpass_gen2)
-                                  * sed_integrate(wave_start=wave_start, wave_end=wave_end))
+            sed_band_integral += (next(bandpass_gen2) *
+                                  sed_integrate(wave_start=wave_start, wave_end=wave_end))
         flux_band_norm = flux_to_jansky * flux_raw * flux_band_fraction / bandwidth_hz
 
         for wave_start, wave_end in _wavelength_iterator(bandpass):
-            yield(flux_band_norm * next(bandpass_gen)
-                  * sed_integrate(wave_start=wave_start, wave_end=wave_end) / sed_band_integral)
+            yield(flux_band_norm * next(bandpass_gen) *
+                  sed_integrate(wave_start=wave_start, wave_end=wave_end) / sed_band_integral)
 
     else:
         h = constants.Planck
@@ -760,8 +796,8 @@ def _star_gen(sed_list=None, seed=None, bandpass=None, source_record=None, verbo
         flux_band_norm = flux_to_jansky * flux_raw * flux_band_fraction / bandwidth_hz
 
         for wave_start, wave_end in _wavelength_iterator(bandpass):
-            yield(flux_band_norm * next(bandpass_gen)
-                  * radiance_calc(wave_start, wave_end) / radiance_band_integral)
+            yield(flux_band_norm * next(bandpass_gen) *
+                  radiance_calc(wave_start, wave_end) / radiance_band_integral)
 
 
 def _load_bandpass(band_name='g', wavelength_step=None, use_mirror=True, use_lens=True, use_atmos=True,
@@ -1350,10 +1386,13 @@ class SkyNoiseTestCase(lsst.utils.tests.TestCase):
 
 
 class MemoryTester(lsst.utils.tests.MemoryTestCase):
+    """Temp."""
+
     pass
 
 
 def setup_module(module):
+    """Temp."""
     lsst.utils.tests.init()
 
 
