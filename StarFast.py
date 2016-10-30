@@ -77,7 +77,7 @@ class StarSim:
     """Class that defines a random simulated region of sky, and allows fast transformations."""
 
     def __init__(self, psf=None, pixel_scale=None, pad_image=1.5, catalog=None, sed_list=None,
-                 x_size=512, y_size=512, band_name='g', photons_per_jansky=None, obsid=100,
+                 x_size=512, y_size=512, band_name='g', photons_per_jansky=None, 
                  ra=None, dec=None, ra_reference=lsst_lon, dec_reference=lsst_lat,
                  sky_rotation=0.0, exposure_time=30.0, saturation_value=65000,
                  background_level=314, **kwargs):
@@ -93,7 +93,6 @@ class StarSim:
         @param y_size: Number of pixels on the y-axis
         @param band_name: Common name of the filter used. For LSST, use u, g, r, i, z, or y
         @param photons_per_jansky: Conversion factor between Jansky units and photons
-        @param obsid: unique identificatin number for different runs of the same simulation.
         @param ra: Right Ascension of the center of the simulation. Used only for the wcs of output fits files
         @param dec: Declination of the center of the simulation. Used only for the wcs of output fits files.
         @param ra_reference: Right Ascension of the center of the field for the reference catalog
@@ -139,7 +138,6 @@ class StarSim:
         self.n_star = None
         self.saturation = saturation_value  # in counts
         self.background = background_level  # in counts
-        self.obsid = obsid  # observation number used when persisting images
         if photons_per_jansky is None:
             photon_energy = constants.Planck*constants.speed_of_light/(bandpass.calc_eff_wavelen()/1e9)
             photons_per_jansky = (1e-26 * (self.photoParams.effarea / 1e4) *
@@ -320,8 +318,11 @@ class StarSim:
                 print(_timing_report(n_star=n_bright, bright=True, timing=timing_model))
 
     def convolve(self, seed=None, sky_noise=0, instrument_noise=0, photon_noise=0, verbose=True,
-                 elevation=None, azimuth=None, **kwargs):
-        """Convolve a simulated sky with a given PSF. Returns an LSST exposure."""
+                 elevation=None, azimuth=None, exposureId=None, **kwargs):
+        """Convolve a simulated sky with a given PSF. Returns an LSST exposure.
+
+        @param exposureId: unique identificatin number for different runs of the same simulation.
+        """
         CoordsXY = self.coord
         sky_noise_gen = _sky_noise_gen(CoordsXY, seed=seed, amplitude=sky_noise,
                                        n_step=self.n_step, verbose=verbose)
@@ -336,13 +337,14 @@ class StarSim:
         else:
             bright_image = 0.0
         return_image = (source_image + bright_image) * self.counts_per_jansky + self.background
-        variance = return_image[:, :] / self.photoParams.gain
+        variance = return_image[:, :]
 
         if photon_noise > 0:
             rand_gen = np.random
             if seed is not None:
                 rand_gen.seed(seed - 1.2)
-            return_image = rand_gen.poisson(variance).astype(float)
+            photon_scale = self.photoParams.gain/photon_noise
+            return_image = np.round(rand_gen.poisson(variance*photon_scale)/photon_scale)
         if instrument_noise is None:
             instrument_noise = self.photoParams.readnoise
 
@@ -354,7 +356,8 @@ class StarSim:
             noise_image = rand_gen.normal(scale=instrument_noise, size=return_image.shape)
             return_image += noise_image
         exposure = self.create_exposure(return_image, variance=variance, boresightRotAngle=self.sky_rotation,
-                                        ra=self.ra, dec=self.dec, elevation=elevation, azimuth=azimuth)
+                                        ra=self.ra, dec=self.dec, elevation=elevation, azimuth=azimuth,
+                                        exposureId=exposureId, **kwargs)
         return(exposure)
 
     def _convolve_subroutine(self, sky_noise_gen, psf=None, verbose=True, bright=False,
@@ -435,9 +438,9 @@ class StarSim:
         if self.mask is not None:
             exposure.getMaskedImage().getMask().getArray()[:, :] = self.mask
 
-        hour_angle = (90.0 - elevation.asDegrees())*np.cos(azimuth.asRadians())/15.0
+        hour_angle = (90.0 - elevation)*np.cos(np.radians(azimuth))/15.0
         mjd = 59000.0 + (lsst_lat.asDegrees()/15.0 - hour_angle)/24.0
-        airmass = 1.0/np.sin(elevation.asRadians())
+        airmass = 1.0/np.sin(np.radians(elevation))
         meta = exposure.getMetadata()
         meta.add("CHIPID", "R22_S11")
         # Required! Phosim output stores the snap ID in "OUTFILE" as the last three characters in a string.
