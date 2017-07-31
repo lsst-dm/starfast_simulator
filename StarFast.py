@@ -105,8 +105,8 @@ class StarSim:
         bandpass = _load_bandpass(band_name=band_name, **kwargs)
         self.n_step = int(np.ceil((bandpass.wavelen_max - bandpass.wavelen_min) / bandpass.wavelen_step))
         self.bandpass = bandpass
-        self.photoParams = PhotometricParameters(exptime=exposure_time, nexp=1, platescale=pixel_scale,
-                                                 bandpass=band_name)
+        self.photParams = PhotometricParameters(exptime=exposure_time, nexp=1, platescale=pixel_scale,
+                                                bandpass=band_name)
         self.band_name = band_name
         if sed_list is None:
             # Load in model SEDs
@@ -114,7 +114,7 @@ class StarSim:
             sed_list = matchStarObj.loadKuruczSEDs()
         self.sed_list = sed_list
         self.catalog = catalog
-        self.coord = _CoordsXY(pixel_scale=self.photoParams.platescale, pad_image=pad_image,
+        self.coord = _CoordsXY(pixel_scale=self.photParams.platescale, pad_image=pad_image,
                                x_size=x_size, y_size=y_size)
         self.bbox = afwGeom.Box2I(afwGeom.Point2I(0, 0), afwGeom.ExtentI(x_size, y_size))
         self.sky_rotation = sky_rotation
@@ -140,10 +140,10 @@ class StarSim:
         self.background = background_level  # in counts
         if photons_per_jansky is None:
             photon_energy = constants.Planck*constants.speed_of_light/(bandpass.calc_eff_wavelen()/1e9)
-            photons_per_jansky = (1e-26 * (self.photoParams.effarea / 1e4) *
+            photons_per_jansky = (1e-26 * (self.photParams.effarea / 1e4) *
                                   bandpass.calc_bandwidth() / photon_energy)
 
-        self.counts_per_jansky = photons_per_jansky / self.photoParams.gain
+        self.counts_per_jansky = photons_per_jansky / self.photParams.gain
 
     def load_psf(self, psf, edge_dist=None, _kernel_radius=None, **kwargs):
         """Load a PSF class from galsim. The class needs to have two methods, getFWHM() and drawImage()."""
@@ -343,10 +343,10 @@ class StarSim:
             rand_gen = np.random
             if seed is not None:
                 rand_gen.seed(seed - 1.2)
-            photon_scale = self.photoParams.gain/photon_noise
+            photon_scale = self.photParams.gain/photon_noise
             return_image = np.round(rand_gen.poisson(variance*photon_scale)/photon_scale)
         if instrument_noise is None:
-            instrument_noise = self.photoParams.readnoise
+            instrument_noise = self.photParams.readnoise
 
         if instrument_noise > 0:
             rand_gen = np.random
@@ -421,12 +421,12 @@ class StarSim:
         exposure.setWcs(self.wcs)
         # We need the filter name in the exposure metadata, and it can't just be set directly
         try:
-            exposure.setFilter(afwImage.Filter(self.photoParams.bandpass))
+            exposure.setFilter(afwImage.Filter(self.photParams.bandpass))
         except:
             filterPolicy = pexPolicy.Policy()
             filterPolicy.add("lambdaEff", self.bandpass.calc_eff_wavelen())
-            afwImage.Filter.define(afwImage.FilterProperty(self.photoParams.bandpass, filterPolicy))
-            exposure.setFilter(afwImage.Filter(self.photoParams.bandpass))
+            afwImage.Filter.define(afwImage.FilterProperty(self.photParams.bandpass, filterPolicy))
+            exposure.setFilter(afwImage.Filter(self.photParams.bandpass))
             # Need to reset afwImage.Filter to prevent an error in future calls to daf_persistence.Butler
             afwImage.FilterProperty_reset()
         exposure.setPsf(self._calc_effective_psf(elevation=elevation, azimuth=azimuth, **kwargs))
