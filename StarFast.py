@@ -104,6 +104,7 @@ class StarSim:
         bandpass = _load_bandpass(band_name=band_name, **kwargs)
         self.n_step = int(np.ceil((bandpass.wavelen_max - bandpass.wavelen_min) / bandpass.wavelen_step))
         self.bandpass = bandpass
+        self.bandpass_highres = _load_bandpass(band_name=band_name, highres=True, **kwargs)
         self.photParams = PhotometricParameters(exptime=exposure_time, nexp=1, platescale=pixel_scale,
                                                 bandpass=band_name)
         self.band_name = band_name
@@ -205,7 +206,8 @@ class StarSim:
         flux_arr = np.zeros((n_star, self.n_step))
 
         for _i, source_record in enumerate(catalog_use):
-            star_spectrum = _star_gen(sed_list=sed_list, bandpass=self.bandpass, source_record=source_record)
+            star_spectrum = _star_gen(sed_list=sed_list, bandpass=self.bandpass, source_record=source_record,
+                                      bandpass_highres=self.bandpass_highres, photParams=self.photParams)
             flux_arr[_i, :] = np.array([flux_val for flux_val in star_spectrum])
         flux_tot = np.sum(flux_arr, axis=1)
         if n_star > 3:
@@ -267,12 +269,14 @@ class StarSim:
 
         for _f, f_name in enumerate(filter_list):
             bp = _load_bandpass(band_name=f_name, wavelength_step=wavelength_step)
+            bp_highres = _load_bandpass(band_name=f_name, wavelength_step=None)
             # build an empty list to store the flux of each star in each filter
             mag_single = []
             for _i, source_rec in enumerate(self.catalog):
                 if src_use[_i]:
-                    star_spectrum = _star_gen(sed_list=self.sed_list, bandpass=bp, source_record=source_rec)
-                    magnitude = -2.512 * np.log10(np.sum(star_spectrum) / 3631.0)
+                    star_spectrum = _star_gen(sed_list=self.sed_list, bandpass=bp, source_record=source_rec,
+                                              bandpass_highres=bp_highres, photParams=self.photParams)
+                    magnitude = -2.512*np.log10(np.sum(star_spectrum)*self.counts_per_jansky/3631.0)
                     mag_single.append(magnitude)
             data_array[:, 3 + _f] = np.array(mag_single)
             header += ", lsst_%s" % f_name
@@ -335,7 +339,7 @@ class StarSim:
                                                      elevation=elevation, azimuth=azimuth, **kwargs)
         else:
             bright_image = 0.0
-        return_image = (source_image + bright_image) * self.counts_per_jansky + self.background
+        return_image = (source_image + bright_image) + self.background
         variance = return_image[:, :]
 
         if photon_noise > 0:
@@ -674,7 +678,8 @@ def _cat_sim(seed=None, n_star=None, n_galaxy=None, sky_radius=None, name=None, 
     return(catalog.copy(True))  # Return a copy to make sure it is contiguous in memory.
 
 
-def _star_gen(sed_list=None, seed=None, bandpass=None, source_record=None, verbose=True):
+def _star_gen(sed_list=None, seed=None, bandpass=None, bandpass_highres=None,
+              source_record=None, verbose=True, photParams=None):
     """Generate a randomized spectrum at a given temperature over a range of wavelengths."""
     """
         Either use a supplied list of SEDs to be drawn from, or use a blackbody radiation model.
@@ -689,6 +694,7 @@ def _star_gen(sed_list=None, seed=None, bandpass=None, source_record=None, verbo
         @param surface_gravity: surface gravity of the star, relative to solar
         @param flux: Total broadband flux of the star, in W/m^2
         @param bandpass: bandpass object created with load_bandpass
+        @param bandpass_highres: max resolution bandpass object created with load_bandpass
 
         @return Returns an array of flux values (one entry per sub-band of the simulation)
     """
@@ -706,10 +712,6 @@ def _star_gen(sed_list=None, seed=None, bandpass=None, source_record=None, verbo
     else:
         temperatures = np.array([star.temp for star in sed_list])
         t_ref = [temperatures.min(), temperatures.max()]
-
-    bp_wavelen, bandpass_vals = bandpass.getBandpass()
-    bandpass_gen = (bp for bp in bandpass_vals)
-    bandpass_gen2 = (bp2 for bp2 in bandpass_vals)
 
     schema = source_record.getSchema()
     schema_entry = schema.extract("*_fluxRaw", ordered='true')
@@ -734,33 +736,22 @@ def _star_gen(sed_list=None, seed=None, bandpass=None, source_record=None, verbo
             grav_weight = ((grav_list + offset) / (surface_gravity + offset) - 1.0)**2.0
             metal_weight = ((metal_list + offset) / (metallicity + offset) - 1.0)**2.0
             composite_weight = grav_weight + metal_weight
-            sed_i = t_inds[np.argmin(composite_weight)]
+            sed = sed_list[t_inds[np.argmin(composite_weight)]]
         else:
-            sed_i = t_inds[0]
+            sed = sed_list[t_inds[0]]
 
-        def sed_integrate(sed=sed_list[sed_i], wave_start=None, wave_end=None):
-            wavelengths = sed.wavelen
-            flambdas = sed.flambda
-            waves = (wavelengths >= wave_start) & (wavelengths < wave_end)
-            return(flambdas[waves].sum())
-
-        # integral over the full sed, to convert from W/m**2 to W/m**2/Hz
-        sed_full_integral = sed_integrate(wave_end=np.Inf)
-        flux_band_fraction = sed_integrate(wave_start=bandpass.wavelen_min, wave_end=bandpass.wavelen_max)
-        flux_band_fraction /= sed_full_integral
-
-        # integral over the full bandpass, to convert back to astrophysical quantities
-        sed_band_integral = 0.0
+        sb_vals = bandpass_highres.sb.copy()
         for wave_start, wave_end in _wavelength_iterator(bandpass):
-            sed_band_integral += (next(bandpass_gen2) *
-                                  sed_integrate(wave_start=wave_start, wave_end=wave_end))
-        flux_band_norm = flux_to_jansky * flux_raw * flux_band_fraction / bandwidth_hz
-
-        for wave_start, wave_end in _wavelength_iterator(bandpass):
-            yield(flux_band_norm * next(bandpass_gen) *
-                  sed_integrate(wave_start=wave_start, wave_end=wave_end) / sed_band_integral)
+            bandpass_highres.sb[:] = 0.
+            wl_inds = (bandpass_highres.wavelen >= wave_start) & (bandpass_highres.wavelen < wave_end)
+            bandpass_highres.sb[wl_inds] = sb_vals[wl_inds]
+            yield sed.calcADU(bandpass_highres, photParams)*flux_raw
 
     else:
+        bp_wavelen, bandpass_vals = bandpass.getBandpass()
+        bandpass_gen = (bp for bp in bandpass_vals)
+        bandpass_gen2 = (bp2 for bp2 in bandpass_vals)
+
         h = constants.Planck
         kb = constants.Boltzmann
         c = constants.speed_of_light
