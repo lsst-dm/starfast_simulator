@@ -1,5 +1,3 @@
-#
-
 # LSST Data Management System
 # Copyright 2016 LSST Corporation.
 #
@@ -20,6 +18,7 @@
 # the GNU General Public License along with this program.  If not,
 # see <http://www.lsstcorp.org/LegalNotices/>.
 #
+
 """
 StarFast is a simple but fast simulation tool to generate images for testing algorithms.
 It is optimized for creating many realizations of the same field of sky under different observing conditions.
@@ -77,7 +76,7 @@ class StarSim:
     """Class that defines a random simulated region of sky, and allows fast transformations."""
 
     def __init__(self, psf=None, pixel_scale=None, pad_image=1.5, catalog=None, sed_list=None,
-                 x_size=512, y_size=512, band_name='g', photons_per_jansky=None, 
+                 x_size=512, y_size=512, band_name='g', photons_per_jansky=None,
                  ra=None, dec=None, ra_reference=lsst_lon, dec_reference=lsst_lat,
                  sky_rotation=0.0, exposure_time=30.0, saturation_value=65000,
                  background_level=314, **kwargs):
@@ -723,7 +722,7 @@ def _star_gen(sed_list=None, seed=None, bandpass=None, source_record=None, verbo
 
     # If the desired temperature is outside of the range of models in sed_list, then use a blackbody.
     if temperature >= t_ref[0] and temperature <= t_ref[1]:
-        temp_weight = np.abs(temperatures / temperature - 1.0)
+        temp_weight = np.abs(temperatures/temperature - 1.0)
         temp_thresh = np.min(temp_weight)
         t_inds = np.where(temp_weight <= temp_thresh)
         t_inds = t_inds[0]  # unpack tuple from np.where()
