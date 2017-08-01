@@ -702,8 +702,11 @@ def _star_gen(sed_list=None, seed=None, bandpass=None, bandpass_highres=None,
 
         @return Returns an array of flux values (one entry per sub-band of the simulation)
     """
-    flux_to_jansky = 1.0e26
+    # flux_to_jansky = 1.0e26
     bandwidth_hz = bandpass.calc_bandwidth()
+    photon_energy = constants.Planck*constants.speed_of_light/(bandpass.calc_eff_wavelen()/1e9)
+    photons_per_jansky = ((photParams.effarea/1e4)*bandwidth_hz/photon_energy)
+    flux_to_counts = photons_per_jansky/photParams.gain
 
     def integral(generator):
         """Simple wrapper to make the math more apparent."""
@@ -788,7 +791,7 @@ def _star_gen(sed_list=None, seed=None, bandpass=None, bandpass_highres=None,
         radiance_band_integral = 0.0
         for wave_start, wave_end in _wavelength_iterator(bandpass):
             radiance_band_integral += next(bandpass_gen2) * radiance_calc(wave_start, wave_end)
-        flux_band_norm = flux_to_jansky * flux_raw * flux_band_fraction / bandwidth_hz
+        flux_band_norm = flux_to_counts * flux_raw * flux_band_fraction / bandwidth_hz
 
         for wave_start, wave_end in _wavelength_iterator(bandpass):
             yield(flux_band_norm * next(bandpass_gen) *
