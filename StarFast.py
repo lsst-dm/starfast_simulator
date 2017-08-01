@@ -1,5 +1,3 @@
-#
-
 # LSST Data Management System
 # Copyright 2016 LSST Corporation.
 #
@@ -20,6 +18,7 @@
 # the GNU General Public License along with this program.  If not,
 # see <http://www.lsstcorp.org/LegalNotices/>.
 #
+
 """
 StarFast is a simple but fast simulation tool to generate images for testing algorithms.
 It is optimized for creating many realizations of the same field of sky under different observing conditions.
@@ -44,6 +43,7 @@ atmospheric, etc... effects. If desired, a different psf may be supplied for eac
 """
 from __future__ import print_function, division, absolute_import
 from collections import OrderedDict
+from copy import deepcopy
 import numpy as np
 from numpy.fft import rfft2, irfft2, fftshift
 import os
@@ -77,10 +77,10 @@ class StarSim:
     """Class that defines a random simulated region of sky, and allows fast transformations."""
 
     def __init__(self, psf=None, pixel_scale=None, pad_image=1.5, catalog=None, sed_list=None,
-                 x_size=512, y_size=512, band_name='g', photons_per_jansky=None, 
+                 x_size=512, y_size=512, band_name='g', photons_per_jansky=None,
                  ra=None, dec=None, ra_reference=lsst_lon, dec_reference=lsst_lat,
                  sky_rotation=0.0, exposure_time=30.0, saturation_value=65000,
-                 background_level=314, **kwargs):
+                 background_level=314, attenuation=1.0, **kwargs):
         """Set up the fixed parameters of the simulation."""
         """
         @param psf: psf object from Galsim. Needs to have methods getFWHM() and drawImage().
@@ -101,12 +101,15 @@ class StarSim:
         @param exposure_time: Length of the exposure, in seconds
         @param saturation_value: Maximum electron counts of the detector before saturation. Turn off with None
         @param background_level: Number of counts to add to every pixel as a sky background.
+        @param attenuation: Set higher to manually attenuate the flux of the simulated stars
         """
         bandpass = _load_bandpass(band_name=band_name, **kwargs)
         self.n_step = int(np.ceil((bandpass.wavelen_max - bandpass.wavelen_min) / bandpass.wavelen_step))
         self.bandpass = bandpass
-        self.photoParams = PhotometricParameters(exptime=exposure_time, nexp=1, platescale=pixel_scale,
-                                                 bandpass=band_name)
+        self.bandpass_highres = _load_bandpass(band_name=band_name, highres=True, **kwargs)
+        self.photParams = PhotometricParameters(exptime=exposure_time, nexp=1, platescale=pixel_scale,
+                                                bandpass=band_name)
+        self.attenuation = attenuation
         self.band_name = band_name
         if sed_list is None:
             # Load in model SEDs
@@ -114,7 +117,7 @@ class StarSim:
             sed_list = matchStarObj.loadKuruczSEDs()
         self.sed_list = sed_list
         self.catalog = catalog
-        self.coord = _CoordsXY(pixel_scale=self.photoParams.platescale, pad_image=pad_image,
+        self.coord = _CoordsXY(pixel_scale=self.photParams.platescale, pad_image=pad_image,
                                x_size=x_size, y_size=y_size)
         self.bbox = afwGeom.Box2I(afwGeom.Point2I(0, 0), afwGeom.ExtentI(x_size, y_size))
         self.sky_rotation = sky_rotation
@@ -140,10 +143,10 @@ class StarSim:
         self.background = background_level  # in counts
         if photons_per_jansky is None:
             photon_energy = constants.Planck*constants.speed_of_light/(bandpass.calc_eff_wavelen()/1e9)
-            photons_per_jansky = (1e-26 * (self.photoParams.effarea / 1e4) *
+            photons_per_jansky = (1e-26 * (self.photParams.effarea / 1e4) *
                                   bandpass.calc_bandwidth() / photon_energy)
 
-        self.counts_per_jansky = photons_per_jansky / self.photoParams.gain
+        self.counts_per_jansky = photons_per_jansky / self.photParams.gain
 
     def load_psf(self, psf, edge_dist=None, _kernel_radius=None, **kwargs):
         """Load a PSF class from galsim. The class needs to have two methods, getFWHM() and drawImage()."""
@@ -206,7 +209,9 @@ class StarSim:
         flux_arr = np.zeros((n_star, self.n_step))
 
         for _i, source_record in enumerate(catalog_use):
-            star_spectrum = _star_gen(sed_list=sed_list, bandpass=self.bandpass, source_record=source_record)
+            star_spectrum = _star_gen(sed_list=sed_list, bandpass=self.bandpass, source_record=source_record,
+                                      bandpass_highres=self.bandpass_highres, photParams=self.photParams,
+                                      attenuation = self.attenuation)
             flux_arr[_i, :] = np.array([flux_val for flux_val in star_spectrum])
         flux_tot = np.sum(flux_arr, axis=1)
         if n_star > 3:
@@ -268,12 +273,15 @@ class StarSim:
 
         for _f, f_name in enumerate(filter_list):
             bp = _load_bandpass(band_name=f_name, wavelength_step=wavelength_step)
+            bp_highres = _load_bandpass(band_name=f_name, wavelength_step=None)
             # build an empty list to store the flux of each star in each filter
             mag_single = []
             for _i, source_rec in enumerate(self.catalog):
                 if src_use[_i]:
-                    star_spectrum = _star_gen(sed_list=self.sed_list, bandpass=bp, source_record=source_rec)
-                    magnitude = -2.512 * np.log10(np.sum(star_spectrum) / 3631.0)
+                    star_spectrum = _star_gen(sed_list=self.sed_list, bandpass=bp, source_record=source_rec,
+                                              bandpass_highres=bp_highres, photParams=self.photParams,
+                                              attenuation = self.attenuation)
+                    magnitude = -2.512*np.log10(np.sum(star_spectrum)*self.counts_per_jansky/3631.0)
                     mag_single.append(magnitude)
             data_array[:, 3 + _f] = np.array(mag_single)
             header += ", lsst_%s" % f_name
@@ -336,17 +344,17 @@ class StarSim:
                                                      elevation=elevation, azimuth=azimuth, **kwargs)
         else:
             bright_image = 0.0
-        return_image = (source_image + bright_image) * self.counts_per_jansky + self.background
+        return_image = (source_image + bright_image) + self.background
         variance = return_image[:, :]
 
         if photon_noise > 0:
             rand_gen = np.random
             if seed is not None:
                 rand_gen.seed(seed - 1.2)
-            photon_scale = self.photoParams.gain/photon_noise
+            photon_scale = self.photParams.gain/photon_noise
             return_image = np.round(rand_gen.poisson(variance*photon_scale)/photon_scale)
         if instrument_noise is None:
-            instrument_noise = self.photoParams.readnoise
+            instrument_noise = self.photParams.readnoise
 
         if instrument_noise > 0:
             rand_gen = np.random
@@ -421,14 +429,17 @@ class StarSim:
         exposure.setWcs(self.wcs)
         # We need the filter name in the exposure metadata, and it can't just be set directly
         try:
-            exposure.setFilter(afwImage.Filter(self.photoParams.bandpass))
+            exposure.setFilter(afwImage.Filter(self.photParams.bandpass))
         except:
             filterPolicy = pexPolicy.Policy()
             filterPolicy.add("lambdaEff", self.bandpass.calc_eff_wavelen())
-            afwImage.Filter.define(afwImage.FilterProperty(self.photoParams.bandpass, filterPolicy))
-            exposure.setFilter(afwImage.Filter(self.photoParams.bandpass))
+            afwImage.Filter.define(afwImage.FilterProperty(self.photParams.bandpass, filterPolicy))
+            exposure.setFilter(afwImage.Filter(self.photParams.bandpass))
             # Need to reset afwImage.Filter to prevent an error in future calls to daf_persistence.Butler
-            afwImage.FilterProperty_reset()
+            try:
+                afwImage.FilterProperty_reset()
+            except:
+                pass  # Do nothing?
         exposure.setPsf(self._calc_effective_psf(elevation=elevation, azimuth=azimuth, **kwargs))
         exposure.getMaskedImage().getImage().getArray()[:, :] = array
         if variance is None:
@@ -675,7 +686,8 @@ def _cat_sim(seed=None, n_star=None, n_galaxy=None, sky_radius=None, name=None, 
     return(catalog.copy(True))  # Return a copy to make sure it is contiguous in memory.
 
 
-def _star_gen(sed_list=None, seed=None, bandpass=None, source_record=None, verbose=True):
+def _star_gen(sed_list=None, seed=None, bandpass=None, bandpass_highres=None,
+              source_record=None, verbose=True, photParams=None, attenuation=1.0):
     """Generate a randomized spectrum at a given temperature over a range of wavelengths."""
     """
         Either use a supplied list of SEDs to be drawn from, or use a blackbody radiation model.
@@ -690,11 +702,15 @@ def _star_gen(sed_list=None, seed=None, bandpass=None, source_record=None, verbo
         @param surface_gravity: surface gravity of the star, relative to solar
         @param flux: Total broadband flux of the star, in W/m^2
         @param bandpass: bandpass object created with load_bandpass
+        @param bandpass_highres: max resolution bandpass object created with load_bandpass
 
         @return Returns an array of flux values (one entry per sub-band of the simulation)
     """
-    flux_to_jansky = 1.0e26
+    # flux_to_jansky = 1.0e26
     bandwidth_hz = bandpass.calc_bandwidth()
+    photon_energy = constants.Planck*constants.speed_of_light/(bandpass.calc_eff_wavelen()/1e9)
+    photons_per_jansky = ((photParams.effarea/1e4)*bandwidth_hz/photon_energy)
+    flux_to_counts = photons_per_jansky/photParams.gain
 
     def integral(generator):
         """Simple wrapper to make the math more apparent."""
@@ -708,22 +724,18 @@ def _star_gen(sed_list=None, seed=None, bandpass=None, source_record=None, verbo
         temperatures = np.array([star.temp for star in sed_list])
         t_ref = [temperatures.min(), temperatures.max()]
 
-    bp_wavelen, bandpass_vals = bandpass.getBandpass()
-    bandpass_gen = (bp for bp in bandpass_vals)
-    bandpass_gen2 = (bp2 for bp2 in bandpass_vals)
-
     schema = source_record.getSchema()
     schema_entry = schema.extract("*_fluxRaw", ordered='true')
     fluxName = schema_entry.iterkeys().next()
 
-    flux_raw = source_record[schema.find(fluxName).key]
+    flux_raw = source_record[schema.find(fluxName).key]/attenuation
     temperature = source_record["temperature"]
     metallicity = source_record["metallicity"]
     surface_gravity = source_record["gravity"]
 
     # If the desired temperature is outside of the range of models in sed_list, then use a blackbody.
     if temperature >= t_ref[0] and temperature <= t_ref[1]:
-        temp_weight = np.abs(temperatures / temperature - 1.0)
+        temp_weight = np.abs(temperatures/temperature - 1.0)
         temp_thresh = np.min(temp_weight)
         t_inds = np.where(temp_weight <= temp_thresh)
         t_inds = t_inds[0]  # unpack tuple from np.where()
@@ -735,33 +747,23 @@ def _star_gen(sed_list=None, seed=None, bandpass=None, source_record=None, verbo
             grav_weight = ((grav_list + offset) / (surface_gravity + offset) - 1.0)**2.0
             metal_weight = ((metal_list + offset) / (metallicity + offset) - 1.0)**2.0
             composite_weight = grav_weight + metal_weight
-            sed_i = t_inds[np.argmin(composite_weight)]
+            sed = sed_list[t_inds[np.argmin(composite_weight)]]
         else:
-            sed_i = t_inds[0]
+            sed = sed_list[t_inds[0]]
 
-        def sed_integrate(sed=sed_list[sed_i], wave_start=None, wave_end=None):
-            wavelengths = sed.wavelen
-            flambdas = sed.flambda
-            waves = (wavelengths >= wave_start) & (wavelengths < wave_end)
-            return(flambdas[waves].sum())
-
-        # integral over the full sed, to convert from W/m**2 to W/m**2/Hz
-        sed_full_integral = sed_integrate(wave_end=np.Inf)
-        flux_band_fraction = sed_integrate(wave_start=bandpass.wavelen_min, wave_end=bandpass.wavelen_max)
-        flux_band_fraction /= sed_full_integral
-
-        # integral over the full bandpass, to convert back to astrophysical quantities
-        sed_band_integral = 0.0
+        sb_vals = bandpass_highres.sb.copy()
+        bp_use = deepcopy(bandpass_highres)
         for wave_start, wave_end in _wavelength_iterator(bandpass):
-            sed_band_integral += (next(bandpass_gen2) *
-                                  sed_integrate(wave_start=wave_start, wave_end=wave_end))
-        flux_band_norm = flux_to_jansky * flux_raw * flux_band_fraction / bandwidth_hz
-
-        for wave_start, wave_end in _wavelength_iterator(bandpass):
-            yield(flux_band_norm * next(bandpass_gen) *
-                  sed_integrate(wave_start=wave_start, wave_end=wave_end) / sed_band_integral)
+            bp_use.sb[:] = 0.
+            wl_inds = (bp_use.wavelen >= wave_start) & (bp_use.wavelen < wave_end)
+            bp_use.sb[wl_inds] = sb_vals[wl_inds]
+            yield sed.calcADU(bp_use, photParams)*flux_raw
 
     else:
+        bp_wavelen, bandpass_vals = bandpass.getBandpass()
+        bandpass_gen = (bp for bp in bandpass_vals)
+        bandpass_gen2 = (bp2 for bp2 in bandpass_vals)
+
         h = constants.Planck
         kb = constants.Boltzmann
         c = constants.speed_of_light
@@ -793,7 +795,7 @@ def _star_gen(sed_list=None, seed=None, bandpass=None, source_record=None, verbo
         radiance_band_integral = 0.0
         for wave_start, wave_end in _wavelength_iterator(bandpass):
             radiance_band_integral += next(bandpass_gen2) * radiance_calc(wave_start, wave_end)
-        flux_band_norm = flux_to_jansky * flux_raw * flux_band_fraction / bandwidth_hz
+        flux_band_norm = flux_to_counts * flux_raw * flux_band_fraction / bandwidth_hz
 
         for wave_start, wave_end in _wavelength_iterator(bandpass):
             yield(flux_band_norm * next(bandpass_gen) *
@@ -801,7 +803,7 @@ def _star_gen(sed_list=None, seed=None, bandpass=None, source_record=None, verbo
 
 
 def _load_bandpass(band_name='g', wavelength_step=None, use_mirror=True, use_lens=True, use_atmos=True,
-                   use_filter=True, use_detector=True, **kwargs):
+                   use_filter=True, use_detector=True, highres=False, **kwargs):
     """Load in Bandpass object from sims_photUtils."""
     """
     @param band_name: Common name of the filter used. For LSST, use u, g, r, i, z, or y
@@ -838,6 +840,8 @@ def _load_bandpass(band_name='g', wavelength_step=None, use_mirror=True, use_len
     Define the wavelength range and resolution for a given ugrizy band.
     These are defined in case the LSST filter throughputs are not used.
     """
+    if highres:
+        wavelength_step = None
     band_dict = {'u': (324.0, 395.0), 'g': (405.0, 552.0), 'r': (552.0, 691.0),
                  'i': (818.0, 921.0), 'z': (922.0, 997.0), 'y': (975.0, 1075.0)}
     band_range = band_dict[band_name]
