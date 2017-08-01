@@ -43,6 +43,7 @@ atmospheric, etc... effects. If desired, a different psf may be supplied for eac
 """
 from __future__ import print_function, division, absolute_import
 from collections import OrderedDict
+from copy import deepcopy
 import numpy as np
 from numpy.fft import rfft2, irfft2, fftshift
 import os
@@ -431,7 +432,10 @@ class StarSim:
             afwImage.Filter.define(afwImage.FilterProperty(self.photParams.bandpass, filterPolicy))
             exposure.setFilter(afwImage.Filter(self.photParams.bandpass))
             # Need to reset afwImage.Filter to prevent an error in future calls to daf_persistence.Butler
-            afwImage.FilterProperty_reset()
+            try:
+                afwImage.FilterProperty_reset()
+            except:
+                pass  # Do nothing?
         exposure.setPsf(self._calc_effective_psf(elevation=elevation, azimuth=azimuth, **kwargs))
         exposure.getMaskedImage().getImage().getArray()[:, :] = array
         if variance is None:
@@ -741,11 +745,12 @@ def _star_gen(sed_list=None, seed=None, bandpass=None, bandpass_highres=None,
             sed = sed_list[t_inds[0]]
 
         sb_vals = bandpass_highres.sb.copy()
+        bp_use = deepcopy(bandpass_highres)
         for wave_start, wave_end in _wavelength_iterator(bandpass):
-            bandpass_highres.sb[:] = 0.
-            wl_inds = (bandpass_highres.wavelen >= wave_start) & (bandpass_highres.wavelen < wave_end)
-            bandpass_highres.sb[wl_inds] = sb_vals[wl_inds]
-            yield sed.calcADU(bandpass_highres, photParams)*flux_raw
+            bp_use.sb[:] = 0.
+            wl_inds = (bp_use.wavelen >= wave_start) & (bp_use.wavelen < wave_end)
+            bp_use.sb[wl_inds] = sb_vals[wl_inds]
+            yield sed.calcADU(bp_use, photParams)*flux_raw
 
     else:
         bp_wavelen, bandpass_vals = bandpass.getBandpass()
@@ -791,7 +796,7 @@ def _star_gen(sed_list=None, seed=None, bandpass=None, bandpass_highres=None,
 
 
 def _load_bandpass(band_name='g', wavelength_step=None, use_mirror=True, use_lens=True, use_atmos=True,
-                   use_filter=True, use_detector=True, **kwargs):
+                   use_filter=True, use_detector=True, highres=False, **kwargs):
     """Load in Bandpass object from sims_photUtils."""
     """
     @param band_name: Common name of the filter used. For LSST, use u, g, r, i, z, or y
@@ -828,6 +833,8 @@ def _load_bandpass(band_name='g', wavelength_step=None, use_mirror=True, use_len
     Define the wavelength range and resolution for a given ugrizy band.
     These are defined in case the LSST filter throughputs are not used.
     """
+    if highres:
+        wavelength_step = None
     band_dict = {'u': (324.0, 395.0), 'g': (405.0, 552.0), 'r': (552.0, 691.0),
                  'i': (818.0, 921.0), 'z': (922.0, 997.0), 'y': (975.0, 1075.0)}
     band_range = band_dict[band_name]
