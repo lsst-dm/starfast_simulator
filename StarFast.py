@@ -104,7 +104,7 @@ class StarSim:
         @param attenuation: Set higher to manually attenuate the flux of the simulated stars
         """
         bandpass = _load_bandpass(band_name=band_name, **kwargs)
-        self.n_step = int(np.ceil((bandpass.wavelen_max - bandpass.wavelen_min) / bandpass.wavelen_step))
+        self.n_step = int(np.ceil((bandpass.wavelen_max - bandpass.wavelen_min)/bandpass.wavelen_step))
         self.bandpass = bandpass
         self.bandpass_highres = _load_bandpass(band_name=band_name, highres=True, **kwargs)
         self.photParams = PhotometricParameters(exptime=exposure_time, nexp=1, platescale=pixel_scale,
@@ -143,10 +143,10 @@ class StarSim:
         self.background = background_level  # in counts
         if photons_per_jansky is None:
             photon_energy = constants.Planck*constants.speed_of_light/(bandpass.calc_eff_wavelen()/1e9)
-            photons_per_jansky = (1e-26 * (self.photParams.effarea / 1e4) *
-                                  bandpass.calc_bandwidth() / photon_energy)
+            photons_per_jansky = (1e-26*(self.photParams.effarea/1e4) *
+                                  bandpass.calc_bandwidth()/photon_energy)
 
-        self.counts_per_jansky = photons_per_jansky / self.photParams.gain
+        self.counts_per_jansky = photons_per_jansky/self.photParams.gain
 
     def load_psf(self, psf, edge_dist=None, _kernel_radius=None, **kwargs):
         """Load a PSF class from galsim. The class needs to have two methods, getFWHM() and drawImage()."""
@@ -155,10 +155,10 @@ class StarSim:
         @param kernel_radius: radius in pixels to use when gridding sources in fast_dft.py.
                               Best to be calculated from psf, unless you know what you are doing!
         """
-        fwhm_to_sigma = 1.0 / (2.0 * np.sqrt(2. * np.log(2)))
+        fwhm_to_sigma = 1.0/(2.0*np.sqrt(2.*np.log(2)))
         self.psf = psf
         CoordsXY = self.coord
-        kernel_min_radius = np.ceil(5 * psf.getFWHM() * fwhm_to_sigma / CoordsXY.scale())
+        kernel_min_radius = np.ceil(5*psf.getFWHM()*fwhm_to_sigma/CoordsXY.scale())
         self.kernel_radius = _kernel_radius
         if self.kernel_radius < kernel_min_radius:
             self.kernel_radius = kernel_min_radius
@@ -166,7 +166,7 @@ class StarSim:
             if CoordsXY.pad > 1:
                 self.edge_dist = 0
             else:
-                self.edge_dist = 5 * psf.getFWHM() * fwhm_to_sigma / CoordsXY.scale()
+                self.edge_dist = 5*psf.getFWHM()*fwhm_to_sigma/CoordsXY.scale()
 
     def load_catalog(self, name=None, sed_list=None, n_star=None, seed=None, **kwargs):
         """Load or generate a catalog of stars to be used for the simulations."""
@@ -184,7 +184,7 @@ class StarSim:
         if self.edge_dist is not None:
             x_size_use += self.edge_dist
             y_size_use += self.edge_dist
-        sky_radius = np.sqrt(x_size_use**2.0 + y_size_use**2.0) * self.wcs.pixelScale().asDegrees()
+        sky_radius = np.sqrt(x_size_use**2.0 + y_size_use**2.0)*self.wcs.pixelScale().asDegrees()
         self.catalog = _cat_sim(sky_radius=sky_radius, wcs=self.wcs, _wcs_ref=self._wcs_ref,
                                 name=name, n_star=n_star, seed=seed, **kwargs)
         self.seed = seed
@@ -211,17 +211,17 @@ class StarSim:
         for _i, source_record in enumerate(catalog_use):
             star_spectrum = _star_gen(sed_list=sed_list, bandpass=self.bandpass, source_record=source_record,
                                       bandpass_highres=self.bandpass_highres, photParams=self.photParams,
-                                      attenuation = self.attenuation)
+                                      attenuation=self.attenuation)
             flux_arr[_i, :] = np.array([flux_val for flux_val in star_spectrum])
         flux_tot = np.sum(flux_arr, axis=1)
         if n_star > 3:
             cat_sigma = np.std(flux_tot[flux_tot - np.median(flux_tot) <
-                                        bright_sigma_threshold * np.std(flux_tot)])
-            bright_inds = (np.where(flux_tot - np.median(flux_tot) > bright_sigma_threshold * cat_sigma))[0]
+                                        bright_sigma_threshold*np.std(flux_tot)])
+            bright_inds = (np.where(flux_tot - np.median(flux_tot) > bright_sigma_threshold*cat_sigma))[0]
             if len(bright_inds) > 0:
                 flux_faint = np.sum(flux_arr) - np.sum(flux_tot[bright_inds])
                 bright_inds = [i_b for i_b in bright_inds
-                               if flux_tot[i_b] > bright_flux_threshold * flux_faint]
+                               if flux_tot[i_b] > bright_flux_threshold*flux_faint]
             bright_flag = np.zeros(n_star)
             bright_flag[bright_inds] = 1
         else:
@@ -245,7 +245,7 @@ class StarSim:
             filter_list = ['u', 'g', 'r', 'i', 'z', 'y']
         n_filter = len(filter_list)
         wavelength_step = self.bandpass.wavelen_step
-        bp_midrange = _load_bandpass(band_name=filter_list[n_filter // 2], wavelength_step=wavelength_step)
+        bp_midrange = _load_bandpass(band_name=filter_list[n_filter//2], wavelength_step=wavelength_step)
         bandwidth_hz = bp_midrange.calc_bandwidth()
         if self.catalog is None:
             raise ValueError("You must first load a catalog with load_catalog!")
@@ -253,9 +253,9 @@ class StarSim:
         schema_entry = schema.extract("*_fluxRaw", ordered='true')
         fluxName = schema_entry.iterkeys().next()
         flux_raw = self.catalog[schema.find(fluxName).key]
-        magnitude_raw = -2.512 * np.log10(flux_raw * flux_to_jansky / bandwidth_hz / 3631.0)
+        magnitude_raw = -2.512*np.log10(flux_raw*flux_to_jansky/bandwidth_hz/3631.0)
         if magnitude_limit is None:
-            magnitude_limit = (np.min(magnitude_raw) + np.max(magnitude_raw)) / 2.0
+            magnitude_limit = (np.min(magnitude_raw) + np.max(magnitude_raw))/2.0
         src_use = magnitude_raw < magnitude_limit
 
         n_star = np.sum(src_use)
@@ -280,7 +280,7 @@ class StarSim:
                 if src_use[_i]:
                     star_spectrum = _star_gen(sed_list=self.sed_list, bandpass=bp, source_record=source_rec,
                                               bandpass_highres=bp_highres, photParams=self.photParams,
-                                              attenuation = self.attenuation)
+                                              attenuation=self.attenuation)
                     magnitude = -2.512*np.log10(np.sum(star_spectrum)*self.counts_per_jansky/3631.0)
                     mag_single.append(magnitude)
             data_array[:, 3 + _f] = np.array(mag_single)
@@ -377,12 +377,12 @@ class StarSim:
             CoordsXY.set_oversample(1)
         dcr_gen = _dcr_generator(self.bandpass, pixel_scale=CoordsXY.scale(),
                                  elevation=elevation, azimuth=azimuth + self.sky_rotation, **kwargs)
-        convol = np.zeros((CoordsXY.ysize(), CoordsXY.xsize() // 2 + 1), dtype='complex64')
+        convol = np.zeros((CoordsXY.ysize(), CoordsXY.xsize()//2 + 1), dtype='complex64')
         if psf is None:
             psf = self.psf
         if self.psf is None:
             self.load_psf(psf)
-        psf_norm = 1.0 / self.psf.getFlux()
+        psf_norm = 1.0/self.psf.getFlux()
         timing_fft = -time.time()
 
         for _i, offset in enumerate(dcr_gen):
@@ -400,11 +400,11 @@ class StarSim:
                 pass
             convol_single = source_model_use * rfft2(psf_image.array)
             convol += convol_single
-        return_image = np.real(fftshift(irfft2(convol))) * CoordsXY.oversample**2.0 * psf_norm
+        return_image = np.real(fftshift(irfft2(convol)))*(CoordsXY.oversample**2.0)*psf_norm
         timing_fft += time.time()
         if verbose:
             print("FFT timing for %i DCR planes: [%0.3fs | %0.3fs per plane]"
-                  % (self.n_step, timing_fft, timing_fft / self.n_step))
+                  % (self.n_step, timing_fft, timing_fft/self.n_step))
         return_image = return_image[CoordsXY.ymin():CoordsXY.ymax():CoordsXY.oversample,
                                     CoordsXY.xmin():CoordsXY.xmax():CoordsXY.oversample]
         if bright:
@@ -512,11 +512,11 @@ def _sky_noise_gen(CoordsXY, seed=None, amplitude=None, n_step=1, verbose=False)
             rand_gen.seed(seed - 1)
         #  Note: it's important to use CoordsXY.xsize() here, since CoordsXY is updated for bright stars
         y_size_use = CoordsXY.ysize()
-        x_size_use = CoordsXY.xsize() // 2 + 1
-        amplitude_use = amplitude / (np.sqrt(n_step / (x_size_use * y_size_use)))
+        x_size_use = CoordsXY.xsize()//2 + 1
+        amplitude_use = amplitude/(np.sqrt(n_step/(x_size_use*y_size_use)))
         for _i in range(n_step):
             rand_fft = (rand_gen.normal(scale=amplitude_use, size=(y_size_use, x_size_use)) +
-                        1j * rand_gen.normal(scale=amplitude_use, size=(y_size_use, x_size_use)))
+                        1j*rand_gen.normal(scale=amplitude_use, size=(y_size_use, x_size_use)))
             yield(rand_fft)
 
 
@@ -552,37 +552,37 @@ class _CoordsXY:
         if base:
             return(int(self._x_size))
         else:
-            return(int(self._x_size * self.pad) * self.oversample)
+            return(int(self._x_size*self.pad)*self.oversample)
 
     def xmin(self):
-        return(int(self.oversample * (self._x_size * (self.pad - 1) // 2)))
+        return(int(self.oversample*(self._x_size*(self.pad - 1)//2)))
 
     def xmax(self):
-        return(int(self.xmin() + self._x_size * self.oversample))
+        return(int(self.xmin() + self._x_size*self.oversample))
 
     def ysize(self, base=False):
         if base:
             return(int(self._y_size))
         else:
-            return(int(self._y_size * self.pad) * self.oversample)
+            return(int(self._y_size*self.pad)*self.oversample)
 
     def ymin(self):
-        return(int(self.oversample * (self._y_size * (self.pad - 1) // 2)))
+        return(int(self.oversample*(self._y_size*(self.pad - 1)//2)))
 
     def ymax(self):
-        return(int(self.ymin() + self._y_size * self.oversample))
+        return(int(self.ymin() + self._y_size*self.oversample))
 
     def scale(self):
-        return(self.pixel_scale / self.oversample)
+        return(self.pixel_scale/self.oversample)
 
     def x_loc(self, bright=False):
-        x_loc = self._x * self.oversample + self.xmin()
+        x_loc = self._x*self.oversample + self.xmin()
         if self.flag is not None:
             x_loc = x_loc[self.flag == bright]
         return(x_loc)
 
     def y_loc(self, bright=False):
-        y_loc = self._y * self.oversample + self.ymin()
+        y_loc = self._y*self.oversample + self.ymin()
         if self.flag is not None:
             y_loc = y_loc[self.flag == bright]
         return(y_loc)
@@ -592,10 +592,10 @@ def _create_wcs(bbox=None, pixel_scale=None, ra=None, dec=None, sky_rotation=Non
     """Create a wcs (coordinate system)."""
     crval = IcrsCoord(ra, dec)
     crpix = afwGeom.Box2D(bbox).getCenter()
-    cd1_1 = (pixel_scale * afwGeom.arcseconds * np.cos(np.radians(sky_rotation))).asDegrees()
-    cd1_2 = (-pixel_scale * afwGeom.arcseconds * np.sin(np.radians(sky_rotation))).asDegrees()
-    cd2_1 = (pixel_scale * afwGeom.arcseconds * np.sin(np.radians(sky_rotation))).asDegrees()
-    cd2_2 = (pixel_scale * afwGeom.arcseconds * np.cos(np.radians(sky_rotation))).asDegrees()
+    cd1_1 = (pixel_scale*afwGeom.arcseconds*np.cos(np.radians(sky_rotation))).asDegrees()
+    cd1_2 = (-pixel_scale*afwGeom.arcseconds*np.sin(np.radians(sky_rotation))).asDegrees()
+    cd2_1 = (pixel_scale*afwGeom.arcseconds*np.sin(np.radians(sky_rotation))).asDegrees()
+    cd2_2 = (pixel_scale*afwGeom.arcseconds*np.cos(np.radians(sky_rotation))).asDegrees()
     return(afwImage.makeWcs(crval, crpix, cd1_1, cd1_2, cd2_1, cd2_2))
 
 
@@ -608,7 +608,7 @@ def _timing_report(n_star=None, bright=False, timing=None):
         return("Time to model %i %sstar: [%0.3fs]" % (n_star, bright_star, timing))
     else:
         return("Time to model %i %sstars: [%0.3fs | %0.5fs per star]"
-               % (n_star, bright_star, timing, timing / n_star))
+               % (n_star, bright_star, timing, timing/n_star))
 
 
 def _dcr_generator(bandpass, pixel_scale=None, elevation=50.0, azimuth=0.0, **kwargs):
@@ -625,9 +625,9 @@ def _dcr_generator(bandpass, pixel_scale=None, elevation=50.0, azimuth=0.0, **kw
         # Note that refract_amp can be negative, since it's relative to the midpoint of the band
         refract_amp = diff_refraction(wavelength=wavelength, wavelength_ref=wavelength_midpoint,
                                       zenith_angle=zenith_angle, **kwargs)
-        refract_amp *= 3600.0 / pixel_scale  # Refraction initially in degrees, convert to pixels.
-        dx = refract_amp * np.sin(np.radians(azimuth))
-        dy = refract_amp * np.cos(np.radians(azimuth))
+        refract_amp *= 3600.0/pixel_scale  # Refraction initially in degrees, convert to pixels.
+        dx = refract_amp*np.sin(np.radians(azimuth))
+        dy = refract_amp*np.cos(np.radians(azimuth))
         yield((dx, dy))
 
 
@@ -744,8 +744,8 @@ def _star_gen(sed_list=None, seed=None, bandpass=None, bandpass_highres=None,
             grav_list = np.array([sed_list[_i].logg for _i in t_inds])
             metal_list = np.array([sed_list[_i].logZ for _i in t_inds])
             offset = 10.0  # Add an offset to the values to prevent dividing by zero
-            grav_weight = ((grav_list + offset) / (surface_gravity + offset) - 1.0)**2.0
-            metal_weight = ((metal_list + offset) / (metallicity + offset) - 1.0)**2.0
+            grav_weight = ((grav_list + offset)/(surface_gravity + offset) - 1.0)**2.0
+            metal_weight = ((metal_list + offset)/(metallicity + offset) - 1.0)**2.0
             composite_weight = grav_weight + metal_weight
             sed = sed_list[t_inds[np.argmin(composite_weight)]]
         else:
@@ -768,38 +768,38 @@ def _star_gen(sed_list=None, seed=None, bandpass=None, bandpass_highres=None,
         kb = constants.Boltzmann
         c = constants.speed_of_light
 
-        prefactor = 2.0 * (kb * temperature)**4. / (h**3 * c**2)
+        prefactor = 2.0*((kb*temperature)**4.)/((h**3)*(c**2))
 
         def radiance_expansion(x, nterms):
             for n in range(1, nterms + 1):
-                poly_term = x**3 / n + 3 * x**2 / n**2 + 6 * x / n**3 + 6 / n**4
-                exp_term = np.exp(-n * x)
-                yield(poly_term * exp_term)
+                poly_term = (x**3)/n + 3*(x**2)/(n**2) + 6*x/(n**3) + 6/(n**4)
+                exp_term = np.exp(-n*x)
+                yield(poly_term*exp_term)
 
         def radiance_calc(wavelength_start, wavelength_end, temperature=temperature, nterms=3):
-            nu1 = c / (wavelength_start / 1E9)
-            nu2 = c / (wavelength_end / 1E9)
-            x1 = h * nu1 / (kb * temperature)
-            x2 = h * nu2 / (kb * temperature)
+            nu1 = c/(wavelength_start/1E9)
+            nu2 = c/(wavelength_end/1E9)
+            x1 = h*nu1/(kb*temperature)
+            x2 = h*nu2/(kb*temperature)
             radiance1 = radiance_expansion(x1, nterms)
             radiance2 = radiance_expansion(x2, nterms)
-            radiance_integral1 = prefactor * integral(radiance1)
-            radiance_integral2 = prefactor * integral(radiance2)
+            radiance_integral1 = prefactor*integral(radiance1)
+            radiance_integral2 = prefactor*integral(radiance2)
             return(radiance_integral1 - radiance_integral2)
 
         # integral over the full sed, to convert from W/m**2 to W/m**2/Hz
-        radiance_full_integral = radiance_calc(bandpass.wavelen_min / 100.0, bandpass.wavelen_max * 100.0)
+        radiance_full_integral = radiance_calc(bandpass.wavelen_min/100.0, bandpass.wavelen_max*100.0)
         flux_band_fraction = radiance_calc(bandpass.wavelen_min, bandpass.wavelen_max)
         flux_band_fraction /= radiance_full_integral
 
         radiance_band_integral = 0.0
         for wave_start, wave_end in _wavelength_iterator(bandpass):
-            radiance_band_integral += next(bandpass_gen2) * radiance_calc(wave_start, wave_end)
-        flux_band_norm = flux_to_counts * flux_raw * flux_band_fraction / bandwidth_hz
+            radiance_band_integral += next(bandpass_gen2)*radiance_calc(wave_start, wave_end)
+        flux_band_norm = flux_to_counts*flux_raw*flux_band_fraction/bandwidth_hz
 
         for wave_start, wave_end in _wavelength_iterator(bandpass):
-            yield(flux_band_norm * next(bandpass_gen) *
-                  radiance_calc(wave_start, wave_end) / radiance_band_integral)
+            yield(flux_band_norm*next(bandpass_gen) *
+                  radiance_calc(wave_start, wave_end)/radiance_band_integral)
 
 
 def _load_bandpass(band_name='g', wavelength_step=None, use_mirror=True, use_lens=True, use_atmos=True,
@@ -827,14 +827,14 @@ def _load_bandpass(band_name='g', wavelength_step=None, use_mirror=True, use_len
             if wavelength_max is None:
                 wavelength_max = np.max(self.wavelen)
             w_inds = (self.wavelen >= wavelength_min) & (self.wavelen <= wavelength_max)
-            effwavelenphi = (self.wavelen[w_inds] * self.phi[w_inds]).sum() / self.phi[w_inds].sum()
+            effwavelenphi = (self.wavelen[w_inds]*self.phi[w_inds]).sum()/self.phi[w_inds].sum()
             return effwavelenphi
 
         def calc_bandwidth(self):
-            f0 = constants.speed_of_light / (self.wavelen_min * 1.0e-9)
-            f1 = constants.speed_of_light / (self.wavelen_max * 1.0e-9)
-            f_cen = constants.speed_of_light / (self.calc_eff_wavelen() * 1.0e-9)
-            return(f_cen * 2.0 * (f0 - f1) / (f0 + f1))
+            f0 = constants.speed_of_light/(self.wavelen_min*1.0e-9)
+            f1 = constants.speed_of_light/(self.wavelen_max*1.0e-9)
+            f_cen = constants.speed_of_light/(self.calc_eff_wavelen()*1.0e-9)
+            return(f_cen*2.0*(f0 - f1)/(f0 + f1))
 
     """
     Define the wavelength range and resolution for a given ugrizy band.
@@ -979,7 +979,7 @@ class _StellarDistribution():
         y_center += pix_origin_offset
         max_star_dist = 10000.0  # light years
         min_star_dist = 100.0  # Assume we're not looking at anything close
-        luminosity_to_flux = lum_solar / (4.0 * pi * ly**2.0)
+        luminosity_to_flux = lum_solar/(4.0*pi*(ly**2.0))
         rand_gen = np.random
         if seed is not None:
             rand_gen.seed(seed)
@@ -1001,20 +1001,20 @@ class _StellarDistribution():
             metallicity_gen = StarCat.gen_metallicity(star_type, rand_gen=rand_gen, n_star=n_use)
             gravity_gen = StarCat.gen_gravity(star_type, rand_gen=rand_gen, n_star=n_use)
             flux_stars_total = 0.0
-            d_min = np.sqrt((rand_gen.uniform(min_star_dist, max_star_dist, size=n_use) ** 2.0 +
-                             rand_gen.uniform(min_star_dist, max_star_dist, size=n_use) ** 2.0))
+            d_min = np.sqrt((rand_gen.uniform(min_star_dist, max_star_dist, size=n_use)**2.0 +
+                             rand_gen.uniform(min_star_dist, max_star_dist, size=n_use)**2.0))
             distance_attenuation = (d_min + rand_gen.uniform(0, max_star_dist - min_star_dist, size=n_use))
-            star_radial_dist = np.sqrt((rand_gen.uniform(-sky_radius, sky_radius, size=n_use) ** 2.0 +
-                                        rand_gen.uniform(-sky_radius, sky_radius, size=n_use) ** 2.0) / 2.0)
-            star_angle = rand_gen.uniform(0.0, 2.0 * pi, size=n_use)
-            pseudo_x = x_center + star_radial_dist * np.cos(star_angle) / pixel_scale_degrees
-            pseudo_y = y_center + star_radial_dist * np.sin(star_angle) / pixel_scale_degrees
+            star_radial_dist = np.sqrt((rand_gen.uniform(-sky_radius, sky_radius, size=n_use)**2.0 +
+                                        rand_gen.uniform(-sky_radius, sky_radius, size=n_use)**2.0)/2.0)
+            star_angle = rand_gen.uniform(0.0, 2.0*pi, size=n_use)
+            pseudo_x = x_center + star_radial_dist*np.cos(star_angle)/pixel_scale_degrees
+            pseudo_y = y_center + star_radial_dist*np.sin(star_angle)/pixel_scale_degrees
 
             for _i in range(n_use):
                 ra_star, dec_star = wcs.pixelToSky(pseudo_x[_i], pseudo_y[_i]).getPosition()
-                ra.append(ra_star * afwGeom.degrees)
-                dec.append(dec_star * afwGeom.degrees)
-                flux_use = next(luminosity_gen) * luminosity_to_flux / distance_attenuation[_i] ** 2.0
+                ra.append(ra_star*afwGeom.degrees)
+                dec.append(dec_star*afwGeom.degrees)
+                flux_use = next(luminosity_gen)*luminosity_to_flux/distance_attenuation[_i]**2.0
                 flux.append(flux_use)
                 temperature.append(next(temperature_gen))
                 metallicity.append(next(metallicity_gen))
@@ -1022,7 +1022,7 @@ class _StellarDistribution():
                 flux_stars_total += flux_use
             flux_star.append(flux_stars_total)
         flux_total = np.sum(flux_star)
-        flux_star = [100. * _f / flux_total for _f in flux_star]
+        flux_star = [100.*_f / flux_total for _f in flux_star]
         info_string = "Number and flux contribution of stars of each type:\n"
         for _i, star_type in enumerate(star_dist):
             info_string += str(" [%s %i| %0.2f%%]" % (star_type, star_dist[star_type], flux_star[_i]))
@@ -1056,20 +1056,20 @@ class _BasicBandpass:
             wavelength_min = self.wavelen_min
         if wavelength_max is None:
             wavelength_max = self.wavelen_max
-        return((wavelength_min + wavelength_max) / 2.0)
+        return((wavelength_min + wavelength_max)/2.0)
 
     def calc_bandwidth(self):
-        f0 = constants.speed_of_light / (self.wavelen_min * 1.0e-9)
-        f1 = constants.speed_of_light / (self.wavelen_max * 1.0e-9)
-        f_cen = constants.speed_of_light / (self.calc_eff_wavelen() * 1.0e-9)
-        return(f_cen * 2.0 * (f0 - f1) / (f0 + f1))
+        f0 = constants.speed_of_light/(self.wavelen_min*1.0e-9)
+        f1 = constants.speed_of_light/(self.wavelen_max*1.0e-9)
+        f_cen = constants.speed_of_light/(self.calc_eff_wavelen()*1.0e-9)
+        return(f_cen*2.0*(f0 - f1)/(f0 + f1))
 
     def getBandpass(self):
         """Mimic the getBandpass method of the real bandpass class."""
         wl_gen = _wavelength_iterator(self)
         wavelengths = [wl[0] for wl in wl_gen]
         wavelengths += [self.wavelen_max]
-        bp_vals = [1] * len(wavelengths)
+        bp_vals = [1]*len(wavelengths)
         return((wavelengths, bp_vals))
 
 
@@ -1103,7 +1103,7 @@ class CoordinatesTestCase(lsst.utils.tests.TestCase):
         self.n_bright = 10
         self.x_loc = rand_gen.uniform(high=self.x_size, size=self.n_star)
         self.y_loc = rand_gen.uniform(high=self.y_size, size=self.n_star)
-        self.flag_array = np.array([False] * self.n_star)
+        self.flag_array = np.array([False]*self.n_star)
         self.flag_array[:2 * self.n_bright:2] = True
         self.coords = _CoordsXY(pixel_scale=self.pixel_scale, pad_image=self.pad_image,
                                 x_size=self.x_size, y_size=self.y_size)
@@ -1126,14 +1126,14 @@ class CoordinatesTestCase(lsst.utils.tests.TestCase):
     def test_coord_size_over_scale(self):
         """Make sure everything gets set, and the math is correct."""
         self.coords.set_oversample(2)
-        self.assertAlmostEqual(2 * self.pad_image * self.x_size, self.coords.xsize())
-        self.assertAlmostEqual(2 * self.pad_image * self.y_size, self.coords.ysize())
+        self.assertAlmostEqual(2*self.pad_image*self.x_size, self.coords.xsize())
+        self.assertAlmostEqual(2*self.pad_image*self.y_size, self.coords.ysize())
 
     def test_coord_size_over_scale_nonint(self):
         """Oversampling must only by integer factors."""
         self.coords.set_oversample(2.3)
-        self.assertAlmostEqual(2 * self.pad_image * self.x_size, self.coords.xsize())
-        self.assertAlmostEqual(2 * self.pad_image * self.y_size, self.coords.ysize())
+        self.assertAlmostEqual(2*self.pad_image*self.x_size, self.coords.xsize())
+        self.assertAlmostEqual(2*self.pad_image*self.y_size, self.coords.ysize())
 
     def test_coord_pixel_scale_base(self):
         """Make sure everything gets set, and the math is correct."""
@@ -1142,7 +1142,7 @@ class CoordinatesTestCase(lsst.utils.tests.TestCase):
     def test_coord_pixel_scale_over(self):
         """Make sure everything gets set, and the math is correct."""
         self.coords.set_oversample(2)
-        self.assertEqual(self.pixel_scale / 2, self.coords.scale())
+        self.assertEqual(self.pixel_scale/2, self.coords.scale())
 
     def test_bright_count(self):
         """Check that the number of locations flagged as bright is correct."""
@@ -1171,8 +1171,8 @@ class CoordinatesTestCase(lsst.utils.tests.TestCase):
         CoordsXY.set_flag(self.flag_array)
         CoordsXY.set_oversample(2)
         bright_condition = True
-        bright_x = 2 * self.x_loc[self.flag_array == bright_condition]
-        bright_y = 2 * self.y_loc[self.flag_array == bright_condition]
+        bright_x = 2*self.x_loc[self.flag_array == bright_condition]
+        bright_y = 2*self.y_loc[self.flag_array == bright_condition]
         abs_diff_x = np.sum(np.abs(bright_x + CoordsXY.xmin() - CoordsXY.x_loc(bright=True)))
         abs_diff_y = np.sum(np.abs(bright_y + CoordsXY.ymin() - CoordsXY.y_loc(bright=True)))
         self.assertAlmostEqual(abs_diff_x, 0)
@@ -1217,7 +1217,7 @@ class DCRTestCase(lsst.utils.tests.TestCase):
         zenith_dcr = (0.0, 0.0)
         bp = self.bandpass
         dcr_gen = _dcr_generator(bp, pixel_scale=self.pixel_scale, elevation=elevation, azimuth=azimuth)
-        n_step = int(np.ceil((bp.wavelen_max - bp.wavelen_min) / bp.wavelen_step))
+        n_step = int(np.ceil((bp.wavelen_max - bp.wavelen_min)/bp.wavelen_step))
         for _i in range(n_step):
             self.assertAlmostEqual(next(dcr_gen), zenith_dcr)
         with self.assertRaises(StopIteration):
@@ -1232,7 +1232,7 @@ class DCRTestCase(lsst.utils.tests.TestCase):
                     -0.628721688199, -0.791313886049, -0.946883455499, -1.08145326102, -1.16120917137]
         bp = self.bandpass
         dcr_gen = _dcr_generator(bp, pixel_scale=self.pixel_scale, elevation=elevation, azimuth=azimuth)
-        n_step = int(np.ceil((bp.wavelen_max - bp.wavelen_min) / bp.wavelen_step))
+        n_step = int(np.ceil((bp.wavelen_max - bp.wavelen_min)/bp.wavelen_step))
         for _i in range(n_step):
             self.assertAlmostEqual(next(dcr_gen)[1], dcr_vals[_i])
 
@@ -1250,7 +1250,7 @@ class BandpassTestCase(lsst.utils.tests.TestCase):
         """Check that the bandpass has necessary methods, and those return the correct number of values."""
         bp = self.bandpass
         bp_wavelen, bandpass_vals = bp.getBandpass()
-        n_step = int(np.ceil((bp.wavelen_max - bp.wavelen_min) / bp.wavelen_step))
+        n_step = int(np.ceil((bp.wavelen_max - bp.wavelen_min)/bp.wavelen_step))
         self.assertEqual(n_step + 1, len(bandpass_vals))
 
 
@@ -1317,8 +1317,8 @@ class StellarDistributionTestCase(lsst.utils.tests.TestCase):
         self.seed = 42
         self.wcs = _create_wcs(pixel_scale=pixel_scale, bbox=bbox,
                                ra=lsst_lon, dec=lsst_lat, sky_rotation=0)
-        pixel_radius = np.sqrt(((self.x_size / 2.0)**2.0 + (self.y_size / 2.0)**2.0) / 2.0)
-        self.sky_radius = pixel_radius * self.wcs.pixelScale().asDegrees()
+        pixel_radius = np.sqrt(((self.x_size/2.0)**2.0 + (self.y_size/2.0)**2.0)/2.0)
+        self.sky_radius = pixel_radius*self.wcs.pixelScale().asDegrees()
 
     def tearDown(self):
         """Clean up."""
@@ -1385,8 +1385,8 @@ class SkyNoiseTestCase(lsst.utils.tests.TestCase):
         for fft_single in noise_gen:
             noise_fft += fft_single
         noise_image = np.real(fftshift(irfft2(noise_fft)))
-        dimension = np.sqrt(CoordsXY.xsize() * CoordsXY.ysize())
-        self.assertLess(np.abs(np.std(noise_image) - self.amplitude), 1.0 / dimension)
+        dimension = np.sqrt(CoordsXY.xsize()*CoordsXY.ysize())
+        self.assertLess(np.abs(np.std(noise_image) - self.amplitude), 1.0/dimension)
 
 
 class MemoryTester(lsst.utils.tests.MemoryTestCase):
