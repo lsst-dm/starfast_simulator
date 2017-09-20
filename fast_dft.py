@@ -35,6 +35,8 @@ If amplitudes is a two dimensional array (m, n), it is interpreted as a 1D array
 each with n different amplitude values. In this case, a n element list of MxN images will be returned.
 """
 from __future__ import division
+from builtins import next
+from builtins import range
 import numpy as np
 import unittest
 import lsst.utils.tests

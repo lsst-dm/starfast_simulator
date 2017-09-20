@@ -42,6 +42,11 @@ atmospheric, etc... effects. If desired, a different psf may be supplied for eac
     observed_image = example_sim.convolve(psf=psf, options=options)
 """
 from __future__ import print_function, division, absolute_import
+from builtins import zip
+from builtins import str
+from builtins import next
+from builtins import range
+from builtins import object
 from collections import OrderedDict
 from copy import deepcopy
 import numpy as np
@@ -73,7 +78,7 @@ lsst_lon = Angle(np.radians(-70.749417))
 lsst_alt = 2663.
 
 
-class StarSim:
+class StarSim(object):
     """Class that defines a random simulated region of sky, and allows fast transformations."""
 
     def __init__(self, psf=None, pixel_scale=None, pad_image=1.5, catalog=None, sed_list=None,
@@ -160,7 +165,9 @@ class StarSim:
         CoordsXY = self.coord
         kernel_min_radius = np.ceil(5*psf.getFWHM()*fwhm_to_sigma/CoordsXY.scale())
         self.kernel_radius = _kernel_radius
-        if self.kernel_radius < kernel_min_radius:
+        if _kernel_radius is None:
+            self.kernel_radius = kernel_min_radius
+        elif self.kernel_radius < kernel_min_radius:
             self.kernel_radius = kernel_min_radius
         if self.edge_dist is None:
             if CoordsXY.pad > 1:
@@ -251,7 +258,7 @@ class StarSim:
             raise ValueError("You must first load a catalog with load_catalog!")
         schema = self.catalog.getSchema()
         schema_entry = schema.extract("*_fluxRaw", ordered='true')
-        fluxName = schema_entry.iterkeys().next()
+        fluxName = next(iter(schema_entry.keys()))
         flux_raw = self.catalog[schema.find(fluxName).key]
         magnitude_raw = -2.512*np.log10(flux_raw*flux_to_jansky/bandwidth_hz/3631.0)
         if magnitude_limit is None:
@@ -520,7 +527,7 @@ def _sky_noise_gen(CoordsXY, seed=None, amplitude=None, n_step=1, verbose=False)
             yield(rand_fft)
 
 
-class _CoordsXY:
+class _CoordsXY(object):
     def __init__(self, pad_image=1.5, pixel_scale=None, x_size=None, y_size=None):
         self._x_size = x_size
         self._y_size = y_size
@@ -727,7 +734,7 @@ def _star_gen(sed_list=None, seed=None, bandpass=None, bandpass_highres=None,
 
     schema = source_record.getSchema()
     schema_entry = schema.extract("*_fluxRaw", ordered='true')
-    fluxName = schema_entry.iterkeys().next()
+    fluxName = next(iter(schema_entry.keys()))
 
     flux_raw = source_record[schema.find(fluxName).key]/attenuation
     temperature = source_record["temperature"]
@@ -894,7 +901,7 @@ def _wavelength_iterator(bandpass, use_midpoint=False):
         wave_start = wave_end
 
 
-class StarCatalog:
+class StarCatalog(object):
     """A container defining the property ranges of all types of stellar objects used in a simulation."""
 
     def __init__(self, hottest_star='A', coolest_star='M'):
@@ -926,13 +933,13 @@ class StarCatalog:
 
     def distribution(self, n_star, rand_gen=np.random):
         """Generate a random distribution of stars."""
-        max_prob = np.sum(self.abundance.values())
+        max_prob = np.sum(list(self.abundance.values()))
         star_sort = rand_gen.uniform(0.0, max_prob, n_star)
         star_sort.sort()
-        star_prob = np.cumsum(self.abundance.values())
+        star_prob = np.cumsum(list(self.abundance.values()))
         distribution = OrderedDict()
         ind = 0
-        for _i, star in enumerate(self.abundance):
+        for _i, star in enumerate(list(self.abundance)):
             n_use = len([x for x in star_sort[ind:] if x > 0 and x < star_prob[_i]])
             distribution[star] = n_use
             ind += n_use
@@ -967,7 +974,7 @@ class StarCatalog:
             yield val
 
 
-class _StellarDistribution():
+class _StellarDistribution(object):
     def __init__(self, seed=None, n_star=None, hottest_star='A', coolest_star='M',
                  sky_radius=None, wcs=None, verbose=True, **kwargs):
         """Function that attempts to return a realistic distribution of stellar properties."""
@@ -1047,7 +1054,7 @@ class _StellarDistribution():
 
 # -=-=-=-=-=-=-=-=-=-=-=-=-=-=-=-=-=-=-=-=-=-=-=-=-=-=-=-=-=-=-=-=-=-=-=-=-=-=-=-
 
-class _BasicBandpass:
+class _BasicBandpass(object):
     """Dummy bandpass object for testing."""
 
     def __init__(self, band_name='g', wavelength_step=1):
@@ -1082,7 +1089,7 @@ class _BasicBandpass:
         return((wavelengths, bp_vals))
 
 
-class _BasicSED:
+class _BasicSED(object):
     """Dummy SED for testing."""
 
     def __init__(self, temperature=5600.0, metallicity=0.0, surface_gravity=1.0):
