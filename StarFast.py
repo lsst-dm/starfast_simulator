@@ -211,7 +211,7 @@ class StarSim:
         for _i, source_record in enumerate(catalog_use):
             star_spectrum = _star_gen(sed_list=sed_list, bandpass=self.bandpass, source_record=source_record,
                                       bandpass_highres=self.bandpass_highres, photParams=self.photParams,
-                                      attenuation=self.attenuation)
+                                      attenuation=self.attenuation, **kwargs)
             flux_arr[_i, :] = np.array([flux_val for flux_val in star_spectrum])
         flux_tot = np.sum(flux_arr, axis=1)
         if n_star > 3:
@@ -233,7 +233,7 @@ class StarSim:
         CoordsXY.set_x(xv)
         CoordsXY.set_y(yv)
 
-    def make_reference_catalog(self, output_directory=None, filter_list=None, magnitude_limit=None):
+    def make_reference_catalog(self, output_directory=None, filter_list=None, magnitude_limit=None, **kwargs):
         """Create a reference catalog and write it to disk."""
         """
         @param output_directory: path to directory where catalog will be saved.
@@ -280,7 +280,7 @@ class StarSim:
                 if src_use[_i]:
                     star_spectrum = _star_gen(sed_list=self.sed_list, bandpass=bp, source_record=source_rec,
                                               bandpass_highres=bp_highres, photParams=self.photParams,
-                                              attenuation=self.attenuation)
+                                              attenuation=self.attenuation, **kwargs)
                     magnitude = -2.512*np.log10(np.sum(star_spectrum)*self.counts_per_jansky/3631.0)
                     mag_single.append(magnitude)
             data_array[:, 3 + _f] = np.array(mag_single)
@@ -687,7 +687,8 @@ def _cat_sim(seed=None, n_star=None, n_galaxy=None, sky_radius=None, name=None, 
 
 
 def _star_gen(sed_list=None, seed=None, bandpass=None, bandpass_highres=None,
-              source_record=None, verbose=True, photParams=None, attenuation=1.0):
+              source_record=None, verbose=True, photParams=None, attenuation=1.0,
+              force_flat_spectrum=False, **kwargs):
     """Generate a randomized spectrum at a given temperature over a range of wavelengths."""
     """
         Either use a supplied list of SEDs to be drawn from, or use a blackbody radiation model.
@@ -733,8 +734,16 @@ def _star_gen(sed_list=None, seed=None, bandpass=None, bandpass_highres=None,
     metallicity = source_record["metallicity"]
     surface_gravity = source_record["gravity"]
 
+    if force_flat_spectrum:
+        flux_band_fraction = bandpass.wavelen_step/(bandpass.wavelen_max - bandpass.wavelen_min)
+        flux_band_norm = flux_to_counts*flux_raw*flux_band_fraction/bandwidth_hz
+        # rough approximation to account for the bandpass only containing a fraction of the full flux
+        # without actually performing the full calculation (since this is just a quick debugging option)
+        flux_band_norm /= 4.
+        for wave_start, wave_end in _wavelength_iterator(bandpass):
+            yield(flux_band_norm)
     # If the desired temperature is outside of the range of models in sed_list, then use a blackbody.
-    if temperature >= t_ref[0] and temperature <= t_ref[1]:
+    elif temperature >= t_ref[0] and temperature <= t_ref[1]:
         temp_weight = np.abs(temperatures/temperature - 1.0)
         temp_thresh = np.min(temp_weight)
         t_inds = np.where(temp_weight <= temp_thresh)
