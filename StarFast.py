@@ -357,7 +357,7 @@ class StarSim(object):
         if photon_noise > 0:
             rand_gen = np.random
             if seed is not None:
-                rand_gen.seed(seed - 1.2)
+                rand_gen.seed(seed - 2)
             photon_scale = self.photParams.gain/photon_noise
             return_image = np.round(rand_gen.poisson(variance*photon_scale)/photon_scale)
         if instrument_noise is None:
@@ -367,7 +367,7 @@ class StarSim(object):
             rand_gen = np.random
             variance += instrument_noise
             if seed is not None:
-                rand_gen.seed(seed - 1.1)
+                rand_gen.seed(seed - 1)
             noise_image = rand_gen.normal(scale=instrument_noise, size=return_image.shape)
             return_image += noise_image
         exposure = self.create_exposure(return_image, variance=variance, boresightRotAngle=self.sky_rotation,
