@@ -46,7 +46,9 @@ from builtins import zip
 from builtins import str
 from builtins import next
 from builtins import range
-from builtins import object
+
+from astropy.coordinates import ICRS
+from astropy import units
 from collections import OrderedDict
 from copy import deepcopy
 import numpy as np
@@ -56,16 +58,17 @@ from scipy import constants
 import lsst.afw.geom as afwGeom
 import lsst.afw.image as afwImage
 # import lsst.afw.coord as afwCoord
-from lsst.afw.coord import Coord, IcrsCoord, Observatory
-from lsst.afw.geom import Angle
+from lsst.afw.coord import Observatory, Weather
+from lsst.afw.coord.refraction import differentialRefraction
+from lsst.afw.geom import Angle, degrees, arcseconds
 import lsst.afw.math as afwMath
 import lsst.afw.table as afwTable
 from lsst.daf.base import DateTime
 import lsst.meas.algorithms as measAlg
 import lsst.pex.policy as pexPolicy
-from lsst.sims.photUtils import Bandpass, matchStar, PhotometricParameters
+from lsst.sims.catUtils.matchSED.matchUtils import matchStar
+from lsst.sims.photUtils import Bandpass, PhotometricParameters
 from lsst.utils import getPackageDir
-from calc_refractive_index import diff_refraction
 from fast_dft import fast_dft
 import time
 import unittest
@@ -73,22 +76,31 @@ import lsst.utils.tests
 
 nanFloat = float("nan")
 nanAngle = Angle(nanFloat)
-lsst_lat = Angle(np.radians(-30.244639))
-lsst_lon = Angle(np.radians(-70.749417))
+
+
+lsst_lat = -30.244639*degrees
+lsst_lon = -70.749417*degrees
 lsst_alt = 2663.
+lsst_temperature = 20.*units.Celsius  # in degrees Celcius
+lsst_humidity = 40.  # in percent
+lsst_pressure = 73892.*units.pascal
+
+lsst_weather = Weather(lsst_temperature.value, lsst_pressure.value, lsst_humidity)
+lsst_observatory = Observatory(lsst_lon, lsst_lat, lsst_alt)
 
 
-class StarSim(object):
+class StarSim:
     """Class that defines a random simulated region of sky, and allows fast transformations."""
 
     def __init__(self, psf=None, pixel_scale=None, pad_image=1.5, catalog=None, sed_list=None,
                  x_size=512, y_size=512, band_name='g', photons_per_jansky=None,
-                 ra=None, dec=None, ra_reference=lsst_lon, dec_reference=lsst_lat,
+                 ra=None, dec=None, ra_reference=None, dec_reference=None,
                  sky_rotation=0.0, exposure_time=30.0, saturation_value=65000,
-                 background_level=314, attenuation=1.0, **kwargs):
+                 background_level=314, attenuation=1.0,
+                 weather=lsst_weather, observatory=lsst_observatory, **kwargs):
         """Set up the fixed parameters of the simulation."""
         """
-        @param psf: psf object from Galsim. Needs to have methods getFWHM() and drawImage().
+        @param psf: psf object from Galsim. Needs to have methods getFWHM(), drawImage(), and getFlux().
         @param pixel_scale: arcsec/pixel to use for final images.
         @param pad_image: Image size padding factor, to reduce FFT aliasing. Set to 1.0 to tile images.
         @param catalog: Supply a catalog from a previous StarSim run. Untested!
@@ -114,6 +126,8 @@ class StarSim(object):
         self.bandpass_highres = _load_bandpass(band_name=band_name, highres=True, **kwargs)
         self.photParams = PhotometricParameters(exptime=exposure_time, nexp=1, platescale=pixel_scale,
                                                 bandpass=band_name)
+        self.weather = weather
+        self.observatory = observatory
         self.attenuation = attenuation
         self.band_name = band_name
         if sed_list is None:
@@ -126,6 +140,10 @@ class StarSim(object):
                                x_size=x_size, y_size=y_size)
         self.bbox = afwGeom.Box2I(afwGeom.Point2I(0, 0), afwGeom.ExtentI(x_size, y_size))
         self.sky_rotation = sky_rotation
+        if ra_reference is None:
+            ra_reference = observatory.getLongitude()
+        if dec_reference is None:
+            dec_reference = observatory.getLatitude()
         if ra is None:
             ra = ra_reference
         if dec is None:
@@ -154,8 +172,12 @@ class StarSim(object):
         self.counts_per_jansky = photons_per_jansky/self.photParams.gain
 
     def load_psf(self, psf, edge_dist=None, _kernel_radius=None, **kwargs):
-        """Load a PSF class from galsim. The class needs to have two methods, getFWHM() and drawImage()."""
+        """Load a PSF class from galsim."""
         """
+        The class needs to have the following methods:
+                                                      getFWHM()
+                                                      drawImage()
+                                                      getFlux()
         @param edge_dist: Number of pixels from the edge of the image to exclude sources. May be negative.
         @param kernel_radius: radius in pixels to use when gridding sources in fast_dft.py.
                               Best to be calculated from psf, unless you know what you are doing!
@@ -191,7 +213,7 @@ class StarSim(object):
         if self.edge_dist is not None:
             x_size_use += self.edge_dist
             y_size_use += self.edge_dist
-        sky_radius = np.sqrt(x_size_use**2.0 + y_size_use**2.0)*self.wcs.pixelScale().asDegrees()
+        sky_radius = np.sqrt(x_size_use**2.0 + y_size_use**2.0)*self.wcs.getPixelScale().asDegrees()
         self.catalog = _cat_sim(sky_radius=sky_radius, wcs=self.wcs, _wcs_ref=self._wcs_ref,
                                 name=name, n_star=n_star, seed=seed, **kwargs)
         self.seed = seed
@@ -272,26 +294,35 @@ class StarSim(object):
         schema = self.catalog.getSchema()
         raKey = schema.find("coord_ra").key
         decKey = schema.find("coord_dec").key
-        data_array = np.zeros((n_star, 3 + n_filter))
+        data_array = np.zeros((n_star, 3 + 2*n_filter))
         data_array[:, 0] = np.arange(n_star)
         data_array[:, 1] = np.degrees((self.catalog[raKey])[src_use])
         data_array[:, 2] = np.degrees((self.catalog[decKey])[src_use])
         header = "uniqueId, raJ2000, decJ2000"
+        data_format = ["%i", "%f", "%f"]
 
         for _f, f_name in enumerate(filter_list):
             bp = _load_bandpass(band_name=f_name, wavelength_step=wavelength_step)
             bp_highres = _load_bandpass(band_name=f_name, wavelength_step=None)
+            scale_factor = self.counts_per_jansky/bp.calc_bandwidth()/3631.0
             # build an empty list to store the flux of each star in each filter
             mag_single = []
+            mag_err_single = []
             for _i, source_rec in enumerate(self.catalog):
                 if src_use[_i]:
                     star_spectrum = _star_gen(sed_list=self.sed_list, bandpass=bp, source_record=source_rec,
                                               bandpass_highres=bp_highres, photParams=self.photParams,
                                               attenuation=self.attenuation, **kwargs)
-                    magnitude = -2.512*np.log10(np.sum(star_spectrum)*self.counts_per_jansky/3631.0)
+                    magnitude = -2.512*np.log10(np.sum(star_spectrum)*scale_factor)
+                    magnitude_err = 0.2
                     mag_single.append(magnitude)
-            data_array[:, 3 + _f] = np.array(mag_single)
-            header += ", lsst_%s" % f_name
+                    mag_err_single.append(magnitude_err)
+            data_array[:, 3 + 2*_f] = np.array(mag_single)
+            data_array[:, 4 + 2*_f] = np.array(mag_err_single)
+            header += ", %s" % f_name
+            header += ", %s_err" % f_name
+            data_format.append("%f")
+            data_format.append("%f")
 
         base_filename = "starfast_ref_obs_s%in%i.txt" % (self.seed, n_star)
         if output_directory is None:
@@ -301,7 +332,8 @@ class StarSim(object):
                 file_path = output_directory
             else:
                 file_path = os.path.join(output_directory, base_filename)
-        np.savetxt(file_path, data_array, delimiter=", ", header=header)
+
+        np.savetxt(file_path, data_array, delimiter=", ", header=header, fmt=data_format)
 
     def simulate(self, verbose=True, **kwargs):
         """Call fast_dft.py to construct the input sky model for each frequency slice prior to convolution."""
@@ -343,12 +375,12 @@ class StarSim(object):
                                        n_step=self.n_step, verbose=verbose)
         if self.source_model is not None:
             source_image = self._convolve_subroutine(sky_noise_gen, verbose=verbose, bright=False,
-                                                     elevation=elevation, azimuth=azimuth, **kwargs)
+                                                     elevation=elevation, azimuth=azimuth)
         else:
             source_image = 0.0
         if self.bright_model is not None:
             bright_image = self._convolve_subroutine(sky_noise_gen, verbose=verbose, bright=True,
-                                                     elevation=elevation, azimuth=azimuth, **kwargs)
+                                                     elevation=elevation, azimuth=azimuth)
         else:
             bright_image = 0.0
         return_image = (source_image + bright_image) + self.background
@@ -376,14 +408,14 @@ class StarSim(object):
         return(exposure)
 
     def _convolve_subroutine(self, sky_noise_gen, psf=None, verbose=True, bright=False,
-                             elevation=None, azimuth=None, **kwargs):
+                             elevation=None, azimuth=None):
         CoordsXY = self.coord
         if bright:
             CoordsXY.set_oversample(2)
         else:
             CoordsXY.set_oversample(1)
-        dcr_gen = _dcr_generator(self.bandpass, pixel_scale=CoordsXY.scale(),
-                                 elevation=elevation, azimuth=azimuth + self.sky_rotation, **kwargs)
+        dcr_gen = _dcr_generator(self.bandpass, self.weather, self.observatory, pixel_scale=CoordsXY.scale(),
+                                 elevation=elevation, azimuth=azimuth + self.sky_rotation)
         convol = np.zeros((CoordsXY.ysize(), CoordsXY.xsize()//2 + 1), dtype='complex64')
         if psf is None:
             psf = self.psf
@@ -419,7 +451,7 @@ class StarSim(object):
         return(return_image)
 
     def create_exposure(self, array, variance=None, elevation=None, azimuth=None, snap=0,
-                        exposureId=0, ra=nanAngle, dec=nanAngle, boresightRotAngle=nanAngle, **kwargs):
+                        exposureId=0, ra=nanAngle, dec=nanAngle, boresightRotAngle=nanFloat, **kwargs):
         """Convert a numpy array to an LSST exposure, and units of electron counts.
 
         @param array: numpy array to use as the data for the exposure
@@ -472,6 +504,14 @@ class StarSim(object):
         meta.add("AIRMASS", airmass)
         meta.add("ZENITH", 90 - elevation)
         meta.add("AZIMUTH", azimuth)
+        # Convert to an astropy coordinate, to use their formatting.
+        HA = (ICRS(azimuth*units.degree, 0*units.degree)).ra
+        meta.add("HA", HA.to_string(units.hour))  # Convert from degrees to hours.
+        meta.add("RA_DEG", ra.asDegrees())
+        meta.add("DEC_DEG", dec.asDegrees())
+        meta.add("ROTANG", boresightRotAngle)
+        meta.add("TEMPERA", self.weather.getAirTemperature())
+        meta.add("PRESS", self.weather.getAirPressure())
         # Add all additional keyword arguments to the metadata.
         for add_item in kwargs:
             meta.add(add_item, kwargs[add_item])
@@ -482,18 +522,19 @@ class StarSim(object):
             darkTime=30.0,
             date=DateTime(mjd),
             ut1=mjd,
-            boresightRaDec=IcrsCoord(ra, dec),
-            boresightAzAlt=Coord(Angle(np.radians(azimuth)), Angle(np.radians(elevation))),
+            boresightRaDec=afwGeom.SpherePoint(ra, dec),
+            boresightAzAlt=afwGeom.SpherePoint(Angle(np.radians(azimuth)), Angle(np.radians(elevation))),
             boresightAirmass=airmass,
             boresightRotAngle=Angle(np.radians(boresightRotAngle)),
-            observatory=Observatory(lsst_lon, lsst_lat, lsst_alt),)
+            observatory=self.observatory,
+            weather=self.weather)
         exposure.getInfo().setVisitInfo(visitInfo)
         return exposure
 
     def _calc_effective_psf(self, elevation=None, azimuth=None, psf_size=29, **kwargs):
         CoordsXY = self.coord
-        dcr_gen = _dcr_generator(self.bandpass, pixel_scale=CoordsXY.scale(),
-                                 elevation=elevation, azimuth=azimuth + self.sky_rotation, **kwargs)
+        dcr_gen = _dcr_generator(self.bandpass, self.weather, self.observatory, pixel_scale=CoordsXY.scale(),
+                                 elevation=elevation, azimuth=azimuth + self.sky_rotation)
 
         psf_image = afwImage.ImageD(psf_size, psf_size)
         for offset in dcr_gen:
@@ -527,7 +568,7 @@ def _sky_noise_gen(CoordsXY, seed=None, amplitude=None, n_step=1, verbose=False)
             yield(rand_fft)
 
 
-class _CoordsXY(object):
+class _CoordsXY:
     def __init__(self, pad_image=1.5, pixel_scale=None, x_size=None, y_size=None):
         self._x_size = x_size
         self._y_size = y_size
@@ -597,13 +638,13 @@ class _CoordsXY(object):
 
 def _create_wcs(bbox=None, pixel_scale=None, ra=None, dec=None, sky_rotation=None):
     """Create a wcs (coordinate system)."""
-    crval = IcrsCoord(ra, dec)
+    crval = afwGeom.SpherePoint(ra, dec)
     crpix = afwGeom.Box2D(bbox).getCenter()
-    cd1_1 = (pixel_scale*afwGeom.arcseconds*np.cos(np.radians(sky_rotation))).asDegrees()
-    cd1_2 = (-pixel_scale*afwGeom.arcseconds*np.sin(np.radians(sky_rotation))).asDegrees()
-    cd2_1 = (pixel_scale*afwGeom.arcseconds*np.sin(np.radians(sky_rotation))).asDegrees()
-    cd2_2 = (pixel_scale*afwGeom.arcseconds*np.cos(np.radians(sky_rotation))).asDegrees()
-    return(afwImage.makeWcs(crval, crpix, cd1_1, cd1_2, cd2_1, cd2_2))
+    cdMatrix = afwGeom.makeCdMatrix(scale=pixel_scale*arcseconds,
+                                    orientation=Angle(sky_rotation),
+                                    flipX=True)
+    wcs = afwGeom.makeSkyWcs(crpix=crpix, crval=crval, cdMatrix=cdMatrix)
+    return wcs
 
 
 def _timing_report(n_star=None, bright=False, timing=None):
@@ -618,7 +659,7 @@ def _timing_report(n_star=None, bright=False, timing=None):
                % (n_star, bright_star, timing, timing/n_star))
 
 
-def _dcr_generator(bandpass, pixel_scale=None, elevation=50.0, azimuth=0.0, **kwargs):
+def _dcr_generator(bandpass, weather, observatory, pixel_scale=None, elevation=50.0, azimuth=0.0):
     """Call the functions that compute Differential Chromatic Refraction (relative to mid-band)."""
     """
     @param bandpass: bandpass object created with load_bandpass
@@ -626,13 +667,14 @@ def _dcr_generator(bandpass, pixel_scale=None, elevation=50.0, azimuth=0.0, **kw
     @param elevation: elevation angle of the center of the image, in decimal degrees.
     @param azimuth: azimuth angle of the observation, in decimal degrees.
     """
-    zenith_angle = 90.0 - elevation
     wavelength_midpoint = bandpass.calc_eff_wavelen()
     for wavelength in _wavelength_iterator(bandpass, use_midpoint=True):
         # Note that refract_amp can be negative, since it's relative to the midpoint of the band
-        refract_amp = diff_refraction(wavelength=wavelength, wavelength_ref=wavelength_midpoint,
-                                      zenith_angle=zenith_angle, **kwargs)
-        refract_amp *= 3600.0/pixel_scale  # Refraction initially in degrees, convert to pixels.
+        refract_amp = differentialRefraction(wavelength=wavelength, wavelengthRef=wavelength_midpoint,
+                                             elevation=Angle(elevation*degrees),
+                                             weather=weather, observatory=observatory)
+        # Convert refraction amplitude to pixels
+        refract_amp = refract_amp.asArcseconds()/pixel_scale
         dx = refract_amp*np.sin(np.radians(azimuth))
         dy = refract_amp*np.cos(np.radians(azimuth))
         yield((dx, dy))
@@ -678,7 +720,7 @@ def _cat_sim(seed=None, n_star=None, n_galaxy=None, sky_radius=None, name=None, 
     for _i in range(n_star):
         ra = star_properties.ra[_i]
         dec = star_properties.dec[_i]
-        source_test_centroid = wcs.skyToPixel(ra, dec)
+        source_test_centroid = wcs.skyToPixel(afwGeom.SpherePoint(ra, dec))
         source = catalog.addNew()
         source.set(fluxKey, star_properties.raw_flux[_i])
         source.set(centroidKey, source_test_centroid)
@@ -770,9 +812,9 @@ def _star_gen(sed_list=None, seed=None, bandpass=None, bandpass_highres=None,
         sb_vals = bandpass_highres.sb.copy()
         bp_use = deepcopy(bandpass_highres)
         for wave_start, wave_end in _wavelength_iterator(bandpass):
-            bp_use.sb[:] = 0.
-            wl_inds = (bp_use.wavelen >= wave_start) & (bp_use.wavelen < wave_end)
-            bp_use.sb[wl_inds] = sb_vals[wl_inds]
+            bp_use.sb = np.zeros_like(bp_use.sb)
+            for wl_i, wl in enumerate(bp_use.wavelen):
+                bp_use.sb[wl_i] = sb_vals[wl_i] if (wl >= wave_start) & (wl < wave_end) else 0.
             yield sed.calcADU(bp_use, photParams)*flux_raw
 
     else:
@@ -901,7 +943,7 @@ def _wavelength_iterator(bandpass, use_midpoint=False):
         wave_start = wave_end
 
 
-class StarCatalog(object):
+class StarCatalog:
     """A container defining the property ranges of all types of stellar objects used in a simulation."""
 
     def __init__(self, hottest_star='A', coolest_star='M'):
@@ -974,7 +1016,7 @@ class StarCatalog(object):
             yield val
 
 
-class _StellarDistribution(object):
+class _StellarDistribution:
     def __init__(self, seed=None, n_star=None, hottest_star='A', coolest_star='M',
                  sky_radius=None, wcs=None, verbose=True, **kwargs):
         """Function that attempts to return a realistic distribution of stellar properties."""
@@ -988,7 +1030,7 @@ class _StellarDistribution(object):
         lum_solar = 3.846e26  # Solar luminosity, in Watts
         ly = 9.4607e15  # one light year, in meters
         pi = np.pi
-        pixel_scale_degrees = wcs.pixelScale().asDegrees()
+        pixel_scale_degrees = wcs.getPixelScale().asDegrees()
         pix_origin_offset = 0.5
         x_center, y_center = wcs.getPixelOrigin()
         x_center += pix_origin_offset
@@ -1027,9 +1069,9 @@ class _StellarDistribution(object):
             pseudo_y = y_center + star_radial_dist*np.sin(star_angle)/pixel_scale_degrees
 
             for _i in range(n_use):
-                ra_star, dec_star = wcs.pixelToSky(pseudo_x[_i], pseudo_y[_i]).getPosition()
-                ra.append(ra_star*afwGeom.degrees)
-                dec.append(dec_star*afwGeom.degrees)
+                ra_star, dec_star = wcs.pixelToSky(afwGeom.Point2D(pseudo_x[_i], pseudo_y[_i]))
+                ra.append(ra_star)
+                dec.append(dec_star)
                 flux_use = next(luminosity_gen)*luminosity_to_flux/distance_attenuation[_i]**2.0
                 flux.append(flux_use)
                 temperature.append(next(temperature_gen))
@@ -1054,7 +1096,7 @@ class _StellarDistribution(object):
 
 # -=-=-=-=-=-=-=-=-=-=-=-=-=-=-=-=-=-=-=-=-=-=-=-=-=-=-=-=-=-=-=-=-=-=-=-=-=-=-=-
 
-class _BasicBandpass(object):
+class _BasicBandpass:
     """Dummy bandpass object for testing."""
 
     def __init__(self, band_name='g', wavelength_step=1):
@@ -1065,6 +1107,7 @@ class _BasicBandpass(object):
         self.wavelen_min = band_range[0]
         self.wavelen_max = band_range[1]
         self.wavelen_step = wavelength_step
+        self.wavelen, self.sb = self.getBandpass()
 
     def calc_eff_wavelen(self, wavelength_min=None, wavelength_max=None):
         """Mimic the calc_eff_wavelen method of the real bandpass class."""
@@ -1089,7 +1132,7 @@ class _BasicBandpass(object):
         return((wavelengths, bp_vals))
 
 
-class _BasicSED(object):
+class _BasicSED:
     """Dummy SED for testing."""
 
     def __init__(self, temperature=5600.0, metallicity=0.0, surface_gravity=1.0):
@@ -1220,6 +1263,8 @@ class DCRTestCase(lsst.utils.tests.TestCase):
         band_name = 'g'
         wavelength_step = 10.0
         self.pixel_scale = 0.25
+        self.weather = lsst_weather
+        self.observatory = lsst_observatory
         self.bandpass = _load_bandpass(band_name=band_name, wavelength_step=wavelength_step)
 
     def tearDown(self):
@@ -1232,7 +1277,8 @@ class DCRTestCase(lsst.utils.tests.TestCase):
         elevation = 90.0
         zenith_dcr = (0.0, 0.0)
         bp = self.bandpass
-        dcr_gen = _dcr_generator(bp, pixel_scale=self.pixel_scale, elevation=elevation, azimuth=azimuth)
+        dcr_gen = _dcr_generator(bp, weather=self.weather, observatory=self.observatory,
+                                 pixel_scale=self.pixel_scale, elevation=elevation, azimuth=azimuth)
         n_step = int(np.ceil((bp.wavelen_max - bp.wavelen_min)/bp.wavelen_step))
         for _i in range(n_step):
             self.assertAlmostEqual(next(dcr_gen), zenith_dcr)
@@ -1243,11 +1289,12 @@ class DCRTestCase(lsst.utils.tests.TestCase):
         """Check DCR against pre-computed values."""
         azimuth = 0.0
         elevation = 50.0
-        dcr_vals = [1.73959243097, 1.44317957935, 1.1427147535, 0.864107322861, 0.604249563363,
-                    0.363170721045, 0.137678490152, -0.0730964797295, -0.270866384702, -0.455135994183,
-                    -0.628721688199, -0.791313886049, -0.946883455499, -1.08145326102, -1.16120917137]
+        dcr_vals = [1.30271919792, 1.09190646505, 0.873994068277, 0.671023761839, 0.482024401891,
+                    0.306093035352, 0.141471646253, -0.0124702839868, -0.156447638044, -0.291614446648,
+                    -0.418830629658, -0.538108683346, -0.65051491904, -0.749927550502, -0.80762260132]
         bp = self.bandpass
-        dcr_gen = _dcr_generator(bp, pixel_scale=self.pixel_scale, elevation=elevation, azimuth=azimuth)
+        dcr_gen = _dcr_generator(bp, weather=self.weather, observatory=self.observatory,
+                                 pixel_scale=self.pixel_scale, elevation=elevation, azimuth=azimuth)
         n_step = int(np.ceil((bp.wavelen_max - bp.wavelen_min)/bp.wavelen_step))
         for _i in range(n_step):
             self.assertAlmostEqual(next(dcr_gen)[1], dcr_vals[_i])
@@ -1276,6 +1323,8 @@ class StarGenTestCase(lsst.utils.tests.TestCase):
     def setUp(self):
         """Define parameters used by every test."""
         self.bandpass = _BasicBandpass(band_name='g', wavelength_step=10)
+        self.bandpass_highres = _BasicBandpass(band_name='g', wavelength_step=1)
+        self.photParams = PhotometricParameters(exptime=30.0, nexp=1, platescale=.7, bandpass='g')
         flux_raw = 1E-9
         temperature = 5600.0
         schema = afwTable.SourceTable.makeMinimalSchema()
@@ -1299,20 +1348,23 @@ class StarGenTestCase(lsst.utils.tests.TestCase):
 
     def test_blackbody_spectrum(self):
         """Check the blackbody spectrum against pre-computed values."""
-        star_gen = _star_gen(source_record=self.source_rec, bandpass=self.bandpass, verbose=False)
+        star_gen = _star_gen(source_record=self.source_rec, bandpass=self.bandpass, verbose=False,
+                             bandpass_highres=self.bandpass_highres, photParams=self.photParams)
         spectrum = np.array([flux for flux in star_gen])
         pre_comp_spectrum = np.array([5.763797967, 5.933545118, 6.083468705, 6.213969661,
                                       6.325613049, 6.419094277, 6.495208932, 6.554826236,
                                       6.598866015, 6.628278971, 6.644030031, 6.647084472,
                                       6.638396542, 6.618900302, 4.616292143])
-        abs_diff_spectrum = np.sum(np.abs(spectrum - pre_comp_spectrum))
+        print([spectrum[f]/pre for f, pre in enumerate(pre_comp_spectrum)])
+        abs_diff_spectrum = np.sum(np.abs(spectrum - pre_comp_spectrum*65315651.))
         self.assertAlmostEqual(abs_diff_spectrum, 0.0)
 
     def test_sed_spectrum(self):
         """Check a spectrum defined by an SED against pre-computed values."""
         sed_list = [_BasicSED(self.source_rec["temperature"])]
         star_gen = _star_gen(sed_list=sed_list, source_record=self.source_rec,
-                             bandpass=self.bandpass, verbose=True)
+                             bandpass_highres=self.bandpass_highres,
+                             bandpass=self.bandpass, verbose=True, photParams=self.photParams)
         spectrum = np.array([flux for flux in star_gen])
         pre_comp_spectrum = np.array([1.06433106, 1.09032205, 1.11631304, 1.14230403, 1.16829502,
                                       1.19428601, 1.22027700, 1.24626799, 1.27225898, 1.29824997,
@@ -1334,7 +1386,7 @@ class StellarDistributionTestCase(lsst.utils.tests.TestCase):
         self.wcs = _create_wcs(pixel_scale=pixel_scale, bbox=bbox,
                                ra=lsst_lon, dec=lsst_lat, sky_rotation=0)
         pixel_radius = np.sqrt(((self.x_size/2.0)**2.0 + (self.y_size/2.0)**2.0)/2.0)
-        self.sky_radius = pixel_radius*self.wcs.pixelScale().asDegrees()
+        self.sky_radius = pixel_radius*self.wcs.getPixelScale().asDegrees()
 
     def tearDown(self):
         """Clean up."""
@@ -1368,7 +1420,7 @@ class StellarDistributionTestCase(lsst.utils.tests.TestCase):
         x = []
         y = []
         for _ra, _dec in zip(ra, dec):
-            _x, _y = self.wcs.skyToPixel(_ra, _dec)
+            _x, _y = self.wcs.skyToPixel(afwGeom.SpherePoint(_ra, _dec))
             x.append(_x)
             y.append(_y)
         self.assertLess(np.max(x), self.x_size)
