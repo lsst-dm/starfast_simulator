@@ -100,7 +100,7 @@ class StarSim:
                  weather=lsst_weather, observatory=lsst_observatory, **kwargs):
         """Set up the fixed parameters of the simulation."""
         """
-        @param psf: psf object from Galsim. Needs to have methods getFWHM(), drawImage(), and getFlux().
+        @param psf: psf object from Galsim. Needs to have methods calculateFWHM(), drawImage(), and getFlux().
         @param pixel_scale: arcsec/pixel to use for final images.
         @param pad_image: Image size padding factor, to reduce FFT aliasing. Set to 1.0 to tile images.
         @param catalog: Supply a catalog from a previous StarSim run. Untested!
@@ -175,7 +175,7 @@ class StarSim:
         """Load a PSF class from galsim."""
         """
         The class needs to have the following methods:
-                                                      getFWHM()
+                                                      calculateFWHM()
                                                       drawImage()
                                                       getFlux()
         @param edge_dist: Number of pixels from the edge of the image to exclude sources. May be negative.
@@ -185,7 +185,7 @@ class StarSim:
         fwhm_to_sigma = 1.0/(2.0*np.sqrt(2.*np.log(2)))
         self.psf = psf
         CoordsXY = self.coord
-        kernel_min_radius = np.ceil(5*psf.getFWHM()*fwhm_to_sigma/CoordsXY.scale())
+        kernel_min_radius = np.ceil(5*psf.calculateFWHM()*fwhm_to_sigma/CoordsXY.scale())
         self.kernel_radius = _kernel_radius
         if _kernel_radius is None:
             self.kernel_radius = kernel_min_radius
@@ -195,7 +195,7 @@ class StarSim:
             if CoordsXY.pad > 1:
                 self.edge_dist = 0
             else:
-                self.edge_dist = 5*psf.getFWHM()*fwhm_to_sigma/CoordsXY.scale()
+                self.edge_dist = 5*psf.calculateFWHM()*fwhm_to_sigma/CoordsXY.scale()
 
     def load_catalog(self, name=None, sed_list=None, n_star=None, seed=None, **kwargs):
         """Load or generate a catalog of stars to be used for the simulations."""
