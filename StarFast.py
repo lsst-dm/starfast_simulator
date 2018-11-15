@@ -100,7 +100,8 @@ class StarSim:
                  weather=lsst_weather, observatory=lsst_observatory, **kwargs):
         """Set up the fixed parameters of the simulation."""
         """
-        @param psf: psf object from Galsim. Needs to have methods calculateFWHM(), drawImage(), and getFlux().
+        @param psf: psf object from Galsim. Needs to have methods calculateFWHM(), drawImage(),
+                    and attribute flux.
         @param pixel_scale: arcsec/pixel to use for final images.
         @param pad_image: Image size padding factor, to reduce FFT aliasing. Set to 1.0 to tile images.
         @param catalog: Supply a catalog from a previous StarSim run. Untested!
@@ -177,7 +178,7 @@ class StarSim:
         The class needs to have the following methods:
                                                       calculateFWHM()
                                                       drawImage()
-                                                      getFlux()
+                                                      and attribute flux
         @param edge_dist: Number of pixels from the edge of the image to exclude sources. May be negative.
         @param kernel_radius: radius in pixels to use when gridding sources in fast_dft.py.
                               Best to be calculated from psf, unless you know what you are doing!
@@ -365,7 +366,7 @@ class StarSim:
                 print(_timing_report(n_star=n_bright, bright=True, timing=timing_model))
 
     def convolve(self, seed=None, sky_noise=0, instrument_noise=0, photon_noise=0, verbose=True,
-                 elevation=None, azimuth=None, exposureId=None, **kwargs):
+                 elevation=None, azimuth=None, exposureId=None, psf=None, **kwargs):
         """Convolve a simulated sky with a given PSF. Returns an LSST exposure.
 
         @param exposureId: unique identificatin number for different runs of the same simulation.
@@ -374,12 +375,12 @@ class StarSim:
         sky_noise_gen = _sky_noise_gen(CoordsXY, seed=seed, amplitude=sky_noise,
                                        n_step=self.n_step, verbose=verbose)
         if self.source_model is not None:
-            source_image = self._convolve_subroutine(sky_noise_gen, verbose=verbose, bright=False,
+            source_image = self._convolve_subroutine(sky_noise_gen, psf=psf, verbose=verbose, bright=False,
                                                      elevation=elevation, azimuth=azimuth)
         else:
             source_image = 0.0
         if self.bright_model is not None:
-            bright_image = self._convolve_subroutine(sky_noise_gen, verbose=verbose, bright=True,
+            bright_image = self._convolve_subroutine(sky_noise_gen, psf=psf, verbose=verbose, bright=True,
                                                      elevation=elevation, azimuth=azimuth)
         else:
             bright_image = 0.0
@@ -421,7 +422,7 @@ class StarSim:
             psf = self.psf
         if self.psf is None:
             self.load_psf(psf)
-        psf_norm = 1.0/self.psf.getFlux()
+        psf_norm = 1.0/self.psf.flux
         timing_fft = -time.time()
 
         for _i, offset in enumerate(dcr_gen):
@@ -470,9 +471,10 @@ class StarSim:
         try:
             exposure.setFilter(afwImage.Filter(self.photParams.bandpass))
         except:
-            filterPolicy = pexPolicy.Policy()
-            filterPolicy.add("lambdaEff", self.bandpass.calc_eff_wavelen())
-            afwImage.Filter.define(afwImage.FilterProperty(self.photParams.bandpass, filterPolicy))
+            afwImage.Filter.define(afwImage.FilterProperty(self.photParams.bandpass,
+                                                           self.bandpass.calc_eff_wavelen(),
+                                                           self.bandpass.wavelen_min,
+                                                           self.bandpass.wavelen_max))
             exposure.setFilter(afwImage.Filter(self.photParams.bandpass))
             # Need to reset afwImage.Filter to prevent an error in future calls to daf_persistence.Butler
             try:
