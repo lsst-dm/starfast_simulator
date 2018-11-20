@@ -65,7 +65,6 @@ import lsst.afw.math as afwMath
 import lsst.afw.table as afwTable
 from lsst.daf.base import DateTime
 import lsst.meas.algorithms as measAlg
-import lsst.pex.policy as pexPolicy
 from lsst.sims.catUtils.matchSED.matchUtils import matchStar
 from lsst.sims.photUtils import Bandpass, PhotometricParameters
 from lsst.utils import getPackageDir
@@ -100,7 +99,8 @@ class StarSim:
                  weather=lsst_weather, observatory=lsst_observatory, **kwargs):
         """Set up the fixed parameters of the simulation."""
         """
-        @param psf: psf object from Galsim. Needs to have methods calculateFWHM(), drawImage(), and getFlux().
+        @param psf: psf object from Galsim. Needs to have methods calculateFWHM(), drawImage(),
+                    and attribute flux.
         @param pixel_scale: arcsec/pixel to use for final images.
         @param pad_image: Image size padding factor, to reduce FFT aliasing. Set to 1.0 to tile images.
         @param catalog: Supply a catalog from a previous StarSim run. Untested!
@@ -177,7 +177,7 @@ class StarSim:
         The class needs to have the following methods:
                                                       calculateFWHM()
                                                       drawImage()
-                                                      getFlux()
+                                                      and attribute flux
         @param edge_dist: Number of pixels from the edge of the image to exclude sources. May be negative.
         @param kernel_radius: radius in pixels to use when gridding sources in fast_dft.py.
                               Best to be calculated from psf, unless you know what you are doing!
@@ -365,7 +365,7 @@ class StarSim:
                 print(_timing_report(n_star=n_bright, bright=True, timing=timing_model))
 
     def convolve(self, seed=None, sky_noise=0, instrument_noise=0, photon_noise=0, verbose=True,
-                 elevation=None, azimuth=None, exposureId=None, **kwargs):
+                 elevation=None, azimuth=None, exposureId=None, psf=None, **kwargs):
         """Convolve a simulated sky with a given PSF. Returns an LSST exposure.
 
         @param exposureId: unique identificatin number for different runs of the same simulation.
@@ -374,12 +374,12 @@ class StarSim:
         sky_noise_gen = _sky_noise_gen(CoordsXY, seed=seed, amplitude=sky_noise,
                                        n_step=self.n_step, verbose=verbose)
         if self.source_model is not None:
-            source_image = self._convolve_subroutine(sky_noise_gen, verbose=verbose, bright=False,
+            source_image = self._convolve_subroutine(sky_noise_gen, psf=psf, verbose=verbose, bright=False,
                                                      elevation=elevation, azimuth=azimuth)
         else:
             source_image = 0.0
         if self.bright_model is not None:
-            bright_image = self._convolve_subroutine(sky_noise_gen, verbose=verbose, bright=True,
+            bright_image = self._convolve_subroutine(sky_noise_gen, psf=psf, verbose=verbose, bright=True,
                                                      elevation=elevation, azimuth=azimuth)
         else:
             bright_image = 0.0
@@ -421,7 +421,7 @@ class StarSim:
             psf = self.psf
         if self.psf is None:
             self.load_psf(psf)
-        psf_norm = 1.0/self.psf.getFlux()
+        psf_norm = 1.0/self.psf.flux
         timing_fft = -time.time()
 
         for _i, offset in enumerate(dcr_gen):
@@ -470,9 +470,10 @@ class StarSim:
         try:
             exposure.setFilter(afwImage.Filter(self.photParams.bandpass))
         except:
-            filterPolicy = pexPolicy.Policy()
-            filterPolicy.add("lambdaEff", self.bandpass.calc_eff_wavelen())
-            afwImage.Filter.define(afwImage.FilterProperty(self.photParams.bandpass, filterPolicy))
+            afwImage.Filter.define(afwImage.FilterProperty(self.photParams.bandpass,
+                                                           self.bandpass.calc_eff_wavelen(),
+                                                           self.bandpass.wavelen_min,
+                                                           self.bandpass.wavelen_max))
             exposure.setFilter(afwImage.Filter(self.photParams.bandpass))
             # Need to reset afwImage.Filter to prevent an error in future calls to daf_persistence.Butler
             try:
@@ -791,7 +792,6 @@ def _star_gen(sed_list=None, seed=None, bandpass=None, bandpass_highres=None,
         flux_band_norm /= 4.
         for wave_start, wave_end in _wavelength_iterator(bandpass):
             yield(flux_band_norm)
-    # If the desired temperature is outside of the range of models in sed_list, then use a blackbody.
     elif temperature >= t_ref[0] and temperature <= t_ref[1]:
         temp_weight = np.abs(temperatures/temperature - 1.0)
         temp_thresh = np.min(temp_weight)
@@ -816,8 +816,8 @@ def _star_gen(sed_list=None, seed=None, bandpass=None, bandpass_highres=None,
             for wl_i, wl in enumerate(bp_use.wavelen):
                 bp_use.sb[wl_i] = sb_vals[wl_i] if (wl >= wave_start) & (wl < wave_end) else 0.
             yield sed.calcADU(bp_use, photParams)*flux_raw
-
     else:
+        # If the desired temperature is outside of the range of models in sed_list, then use a blackbody.
         bp_wavelen, bandpass_vals = bandpass.getBandpass()
         bandpass_gen = (bp for bp in bandpass_vals)
         bandpass_gen2 = (bp2 for bp2 in bandpass_vals)
@@ -1145,6 +1145,17 @@ class _BasicSED:
         self.wavelen = np.arange(wavelen_min, wavelen_max, wavelen_step)
         self.flambda = np.arange(wavelen_min, wavelen_max, wavelen_step) / wavelen_max
 
+    def calcADU(self, bandpass, photParams):
+
+        photon_energy = constants.Planck*constants.speed_of_light/(bandpass.calc_eff_wavelen()/1e9)
+        photons_per_jansky = (1e-26*(photParams.effarea/1e4) *
+                              bandpass.calc_bandwidth()/photon_energy)
+
+        counts_per_jansky = photons_per_jansky/photParams.gain
+        bandpass_vals = np.interp(self.wavelen, bandpass.wavelen, bandpass.sb, 0., 0.)
+        simple_adu = np.sum(self.flambda*bandpass_vals)*counts_per_jansky
+        return(simple_adu)
+
 
 class CoordinatesTestCase(lsst.utils.tests.TestCase):
     """Test the simple coordinate transformation class."""
@@ -1351,11 +1362,11 @@ class StarGenTestCase(lsst.utils.tests.TestCase):
         star_gen = _star_gen(source_record=self.source_rec, bandpass=self.bandpass, verbose=False,
                              bandpass_highres=self.bandpass_highres, photParams=self.photParams)
         spectrum = np.array([flux for flux in star_gen])
-        pre_comp_spectrum = np.array([5.763797967, 5.933545118, 6.083468705, 6.213969661,
-                                      6.325613049, 6.419094277, 6.495208932, 6.554826236,
-                                      6.598866015, 6.628278971, 6.644030031, 6.647084472,
-                                      6.638396542, 6.618900302, 4.616292143])
-        print([spectrum[f]/pre for f, pre in enumerate(pre_comp_spectrum)])
+        pre_comp_spectrum = np.array([5.7637979669137405, 5.93354511786311, 6.083468704742461,
+                                      6.21396966086581, 6.325613048713335, 6.4190942766733645,
+                                      6.495208931778466, 6.554826236433618, 6.598866014715503,
+                                      6.628278970967843, 6.644030031500907, 6.647084471932508,
+                                      6.638396542012121, 6.618900301765851, 4.616292142671812])
         abs_diff_spectrum = np.sum(np.abs(spectrum - pre_comp_spectrum*65315651.))
         self.assertAlmostEqual(abs_diff_spectrum, 0.0)
 
@@ -1366,9 +1377,10 @@ class StarGenTestCase(lsst.utils.tests.TestCase):
                              bandpass_highres=self.bandpass_highres,
                              bandpass=self.bandpass, verbose=True, photParams=self.photParams)
         spectrum = np.array([flux for flux in star_gen])
-        pre_comp_spectrum = np.array([1.06433106, 1.09032205, 1.11631304, 1.14230403, 1.16829502,
-                                      1.19428601, 1.22027700, 1.24626799, 1.27225898, 1.29824997,
-                                      1.32424096, 1.35023195, 1.37622294, 1.40221393, 0.99701439])
+        pre_comp_spectrum = np.array([0.1337338, 0.13699958, 0.14026536, 0.14353114,
+                                      0.14679693, 0.15006271, 0.15332849, 0.15659427,
+                                      0.15986006, 0.16312584, 0.16639162, 0.1696574,
+                                      0.17292319, 0.17618897, 0.12527542])
         abs_diff_spectrum = np.sum(np.abs(spectrum - pre_comp_spectrum))
         self.assertAlmostEqual(abs_diff_spectrum, 0.0)
 
