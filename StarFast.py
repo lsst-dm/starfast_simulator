@@ -41,10 +41,8 @@ For each simulated observation convolve the raw sky model with the PSF, and incl
 atmospheric, etc... effects. If desired, a different psf may be supplied for each simulation.
     observed_image = example_sim.convolve(psf=psf, options=options)
 """
-# from builtins import str
-# from builtins import next
-# from builtins import range
 
+import astropy.table
 from astropy.coordinates import ICRS
 from astropy import units
 from collections import OrderedDict
@@ -90,7 +88,7 @@ class StarSim:
                  x_size=512, y_size=512, band_name='g', photons_per_jansky=None,
                  ra=None, dec=None, ra_reference=None, dec_reference=None,
                  sky_rotation=0.0, exposure_time=30.0, saturation_value=65000,
-                 background_level=314, attenuation=1.0,
+                 background_level=314, attenuation=1.0, quasar_catalog=None,
                  weather=lsst_weather, observatory=lsst_observatory, **kwargs):
         """Set up the fixed parameters of the simulation."""
         """
@@ -131,8 +129,11 @@ class StarSim:
             sed_list = matchStarObj.loadKuruczSEDs()
         self.sed_list = sed_list
         self.catalog = catalog
+        self.quasar_catalog = quasar_catalog
         self.coord = _CoordsXY(pixel_scale=self.photParams.platescale, pad_image=pad_image,
                                x_size=x_size, y_size=y_size)
+        self.quasar_coord = _CoordsXY(pixel_scale=self.photParams.platescale, pad_image=pad_image,
+                                      x_size=x_size, y_size=y_size)
         self.bbox = afwGeom.Box2I(afwGeom.Point2I(0, 0), afwGeom.ExtentI(x_size, y_size))
         self.sky_rotation = sky_rotation
         if ra_reference is None:
@@ -157,6 +158,9 @@ class StarSim:
         self.source_model = None
         self.bright_model = None
         self.n_star = None
+        self.n_quasar = None
+        self.star_flux = None
+        self.quasar_flux = None
         self.saturation = saturation_value  # in counts
         self.background = background_level  # in counts
         if photons_per_jansky is None:
@@ -257,6 +261,74 @@ class StarSim:
         CoordsXY.set_x(xv)
         CoordsXY.set_y(yv)
 
+    def load_quasar_catalog(self, name=None, n_quasar=None, seed=None, **kwargs):
+        """Load or generate a catalog of stars to be used for the simulations."""
+        """
+        @param name: name of flux entry to use for catalg. Only important for external use of the catalog.
+        @param n_quasar: number of quasars to include in the simulated catalog.
+        @param seed: random number generator seed value. Allows simulations to be recreated.
+        """
+        bright_sigma_threshold = 3.0  # Stars with flux this many sigma over the mean are 'bright'
+        bright_flux_threshold = 0.1  # To be 'bright' a star's flux must exceed
+        #                              this fraction of the flux of all faint stars
+        CoordsXY = self.quasar_coord
+        x_size_use = CoordsXY.xsize(base=True)  # / 2.0
+        y_size_use = CoordsXY.ysize(base=True)  # / 2.0
+        if self.edge_dist is not None:
+            x_size_use += self.edge_dist
+            y_size_use += self.edge_dist
+        sky_radius = np.sqrt(x_size_use**2.0 + y_size_use**2.0)*self.wcs.getPixelScale().asDegrees()
+        self.quasar_catalog = _quasar_sim(sky_radius=sky_radius, wcs=self.wcs, _wcs_ref=self._wcs_ref,
+                                          name=name, n_quasar=n_quasar, seed=seed, **kwargs)
+        self.seed = seed
+
+        xv_full = self.quasar_catalog.getX()
+        yv_full = self.quasar_catalog.getY()
+
+        # The catalog may include stars outside of the field of view of this observation, so trim those.
+        xmin = self.edge_dist
+        xmax = CoordsXY.xsize(base=True) - self.edge_dist
+        ymin = self.edge_dist
+        ymax = CoordsXY.ysize(base=True) - self.edge_dist
+        include_flag = ((xv_full >= xmin) & (xv_full < xmax) & (yv_full >= ymin) & (yv_full < ymax))
+        xv = xv_full[include_flag]
+        yv = yv_full[include_flag]
+        catalog_use = self.quasar_catalog[include_flag]
+
+        n_quasar = len(xv)
+        flux_arr = np.zeros((n_quasar, self.n_step))
+
+        quasar_sed = Quasar_sed()
+
+        for _i, source_record in enumerate(catalog_use):
+            quasar_spectrum = _quasar_gen(source_record=source_record,
+                                          bandpass=self.bandpass,
+                                          bandpass_highres=self.bandpass_highres,
+                                          photParams=self.photParams,
+                                          attenuation=self.attenuation,
+                                          quasar_sed=quasar_sed,
+                                          **kwargs)
+            flux_arr[_i, :] = np.array([flux_val for flux_val in quasar_spectrum])
+        flux_tot = np.sum(flux_arr, axis=1)
+        if n_quasar > 3:
+            cat_sigma = np.std(flux_tot[flux_tot - np.median(flux_tot) <
+                                        bright_sigma_threshold*np.std(flux_tot)])
+            bright_inds = (np.where(flux_tot - np.median(flux_tot) > bright_sigma_threshold*cat_sigma))[0]
+            if len(bright_inds) > 0:
+                flux_faint = np.sum(flux_arr) - np.sum(flux_tot[bright_inds])
+                bright_inds = [i_b for i_b in bright_inds
+                               if flux_tot[i_b] > bright_flux_threshold*flux_faint]
+            bright_flag = np.zeros(n_quasar)
+            bright_flag[bright_inds] = 1
+        else:
+            bright_flag = np.ones(n_quasar)
+
+        self.n_quasar = n_quasar
+        self.quasar_flux = flux_arr
+        CoordsXY.set_flag(bright_flag == 1)
+        CoordsXY.set_x(xv)
+        CoordsXY.set_y(yv)
+
     def make_reference_catalog(self, output_directory=None, filter_list=None, magnitude_limit=None, **kwargs):
         """Create a reference catalog and write it to disk."""
         """
@@ -330,31 +402,47 @@ class StarSim:
 
         np.savetxt(file_path, data_array, delimiter=", ", header=header, fmt=data_format)
 
-    def simulate(self, verbose=True, **kwargs):
+    def simulate(self, verbose=True, useQuasars=False, **kwargs):
         """Call fast_dft.py to construct the input sky model for each frequency slice prior to convolution."""
-        CoordsXY = self.coord
-        n_bright = CoordsXY.n_flag()
-        n_faint = self.n_star - n_bright
-        if verbose:
-            print("Simulating %i stars within observable region" % self.n_star)
+        if useQuasars:
+            CoordsXY = self.quasar_coord
+            n_bright = CoordsXY.n_flag()
+            n_faint = self.n_quasar - n_bright
+            source_flux = self.quasar_flux
+            if verbose:
+                print("Simulating %i quasars within observable region" % self.n_quasar)
+        else:
+            CoordsXY = self.coord
+            n_bright = CoordsXY.n_flag()
+            n_faint = self.n_star - n_bright
+            source_flux = self.star_flux
+            if verbose:
+                print("Simulating %i stars within observable region" % self.n_star)
+
         bright_flag = True
         if n_faint > 0:
             CoordsXY.set_oversample(1)
-            flux = self.star_flux[CoordsXY.flag != bright_flag]
+            if self.source_model is None:
+                self.source_model = np.zeros((self.n_step, CoordsXY.xsize(), CoordsXY.ysize()//2 + 1),
+                                             dtype=np.complex128)
+            flux = source_flux[CoordsXY.flag != bright_flag]
             timing_model = -time.time()
-            self.source_model = fast_dft(flux, CoordsXY.x_loc(bright=False), CoordsXY.y_loc(bright=False),
-                                         x_size=CoordsXY.xsize(), y_size=CoordsXY.ysize(),
-                                         kernel_radius=self.kernel_radius, no_fft=False, **kwargs)
+            self.source_model += fast_dft(flux, CoordsXY.x_loc(bright=False), CoordsXY.y_loc(bright=False),
+                                          x_size=CoordsXY.xsize(), y_size=CoordsXY.ysize(),
+                                          kernel_radius=self.kernel_radius, no_fft=False, **kwargs)
             timing_model += time.time()
             if verbose:
                 print(_timing_report(n_star=n_faint, bright=False, timing=timing_model))
         if n_bright > 0:
             CoordsXY.set_oversample(2)
-            flux = self.star_flux[CoordsXY.flag == bright_flag]
+            if self.bright_model is None:
+                self.bright_model = np.zeros((self.n_step, CoordsXY.xsize(), CoordsXY.ysize()//2 + 1),
+                                             dtype=np.complex128)
+            flux = source_flux[CoordsXY.flag == bright_flag]
             timing_model = -time.time()
-            self.bright_model = fast_dft(flux, CoordsXY.x_loc(bright=True), CoordsXY.y_loc(bright=True),
-                                         x_size=CoordsXY.xsize(), y_size=CoordsXY.ysize(),
-                                         kernel_radius=CoordsXY.xsize(), no_fft=False, **kwargs)
+            self.bright_model += fast_dft(flux, CoordsXY.x_loc(bright=True), CoordsXY.y_loc(bright=True),
+                                          x_size=CoordsXY.xsize(), y_size=CoordsXY.ysize(),
+                                          kernel_radius=CoordsXY.xsize(), no_fft=False, **kwargs)
             timing_model += time.time()
             if verbose:
                 print(_timing_report(n_star=n_bright, bright=True, timing=timing_model))
@@ -728,7 +816,78 @@ def _cat_sim(seed=None, n_star=None, n_galaxy=None, sky_radius=None, name=None, 
         source.set(gravityKey, star_properties.surface_gravity[_i])
         source.set(flagKey, False)
     del star_properties
-    return(catalog.copy(True))  # Return a copy to make sure it is contiguous in memory.
+    return(catalog.copy(True))
+
+
+def _quasar_sim(seed=None, n_quasar=None, sky_radius=None, name=None, wcs=None,
+                _wcs_ref=None, **kwargs):
+    """Wrapper function that generates a semi-realistic catalog of quasars."""
+    schema = afwTable.SourceTable.makeMinimalSchema()
+    if name is None:
+        name = "sim"
+    fluxName = name + "_fluxRaw"
+    flagName = name + "_flag"
+    fluxSigmaName = name + "_fluxSigma"
+    schema.addField(fluxName, type="D")
+    schema.addField(fluxSigmaName, type="D")
+    schema.addField(flagName, type="D")
+    schema.addField(name + "_Centroid_x", type="D")
+    schema.addField(name + "_Centroid_y", type="D")
+    schema.addField("redshift", type="D")
+    schema.getAliasMap().set('slot_Centroid', name + '_Centroid')
+
+    if _wcs_ref is None:
+        _wcs_ref = wcs.clone()
+    quasar_properties = _QuasarDistribution(seed=seed, n_quasar=n_quasar, sky_radius=sky_radius,
+                                            wcs=_wcs_ref, **kwargs)
+
+    catalog = afwTable.SourceCatalog(schema)
+    fluxKey = schema.find(fluxName).key
+    flagKey = schema.find(flagName).key
+    fluxSigmaKey = schema.find(fluxSigmaName).key
+    raKey = schema.find("coord_ra").key
+    decKey = schema.find("coord_dec").key
+    redshiftKey = schema.find("redshift").key
+    centroidKey = afwTable.Point2DKey(schema["slot_Centroid"])
+    for _i in range(n_quasar):
+        ra = quasar_properties.ra[_i]
+        dec = quasar_properties.dec[_i]
+        source_test_centroid = wcs.skyToPixel(afwGeom.SpherePoint(ra, dec))
+        source = catalog.addNew()
+        source.set(fluxKey, quasar_properties.raw_flux[_i])
+        source.set(centroidKey, source_test_centroid)
+        source.set(raKey, ra)
+        source.set(decKey, dec)
+        source.set(fluxSigmaKey, 0.)
+        source.set(redshiftKey, quasar_properties.redshift[_i])
+        source.set(flagKey, False)
+    del quasar_properties
+    return(catalog.copy(True))   # Return a copy to make sure it is contiguous in memory.
+
+
+class Quasar_sed:
+    def __init__(self, sed=None):
+        if sed is None:
+            quasar_sed_path = os.path.join(os.path.dirname(__file__), 'Vanden_Berk_quasars.txt')
+            quasar_sed = astropy.table.Table.read(quasar_sed_path, format='ascii.cds')
+        quasar_wl = np.array(quasar_sed['Wave'])  # Wavelength in Angstroms
+        base_flux = np.array(quasar_sed['FluxD'])  # Relative flux density
+        base_flux /= sum(base_flux)
+        self.wavelen = quasar_wl/10.  # Convert to nm
+        self.flambda = base_flux
+
+    def calcADU(self, bandpass, photParams, redshift):
+
+        photon_energy = constants.Planck*constants.speed_of_light/(bandpass.calc_eff_wavelen()/1e9)
+        photons_per_jansky = (1e-26*(photParams.effarea/1e4) *
+                              bandpass.calc_bandwidth()/photon_energy)
+
+        counts_per_jansky = photons_per_jansky/photParams.gain
+        counts_per_jansky *= 1.8e13  # 1.8e13 factor to put the result on the same scale as simulated stars
+        wl_use = self.wavelen*(1. + redshift)
+        bandpass_vals = np.interp(wl_use, bandpass.wavelen, bandpass.sb, 0., 0.)
+        simple_adu = np.sum(self.flambda*bandpass_vals)*counts_per_jansky
+        return(simple_adu)
 
 
 def _star_gen(sed_list=None, seed=None, bandpass=None, bandpass_highres=None,
@@ -853,6 +1012,25 @@ def _star_gen(sed_list=None, seed=None, bandpass=None, bandpass_highres=None,
         for wave_start, wave_end in _wavelength_iterator(bandpass):
             yield(flux_band_norm*next(bandpass_gen) *
                   radiance_calc(wave_start, wave_end)/radiance_band_integral)
+
+
+def _quasar_gen(source_record, bandpass, bandpass_highres, photParams, attenuation=1.0, quasar_sed=None):
+    if quasar_sed is None:
+        quasar_sed = Quasar_sed()
+
+    schema = source_record.getSchema()
+    schema_entry = schema.extract("*_fluxRaw", ordered='true')
+    fluxName = next(iter(schema_entry.keys()))
+
+    flux_raw = source_record[schema.find(fluxName).key]/attenuation
+    redshift = source_record["redshift"]
+    sb_vals = bandpass_highres.sb.copy()
+    bp_use = deepcopy(bandpass_highres)
+    for wave_start, wave_end in _wavelength_iterator(bandpass):
+        bp_use.sb = np.zeros_like(bp_use.sb)
+        for wl_i, wl in enumerate(bp_use.wavelen):
+            bp_use.sb[wl_i] = sb_vals[wl_i] if (wl >= wave_start) & (wl < wave_end) else 0.
+        yield quasar_sed.calcADU(bp_use, photParams, redshift)*flux_raw
 
 
 def _load_bandpass(band_name='g', wavelength_step=None, use_mirror=True, use_lens=True, use_atmos=True,
@@ -1085,5 +1263,63 @@ class _StellarDistribution:
         self.raw_flux = flux
         self.metallicity = metallicity
         self.surface_gravity = surface_gravity
+        self.ra = ra
+        self.dec = dec
+
+
+class _QuasarDistribution:
+    def __init__(self, seed=None, n_quasar=None, redshift_min=0.2, redshift_max=4.,
+                 sky_radius=None, wcs=None, verbose=True, **kwargs):
+        """Function that attempts to return a realistic distribution of quasar properties."""
+        """
+        NOTE: Currently quite arbitrary flux scaling!
+        The values are chosen to be convenient for analysis, and are not realistic!
+
+        Returns redshift, flux, ra, dec
+        flux in units W/m**2
+        """
+        lum_solar = 3.846e26  # Solar luminosity, in Watts
+        ly = 9.4607e15  # one light year, in meters
+        pi = np.pi
+        pixel_scale_degrees = wcs.getPixelScale().asDegrees()
+        pix_origin_offset = 0.5
+        x_center, y_center = wcs.getPixelOrigin()
+        x_center += pix_origin_offset
+        y_center += pix_origin_offset
+        # NOTE: This uses the same distance parameters as the stellar distribution
+        # This is of course incorrect, since quasars are much farther away
+        # But, it is useful to make sure we have a range of quasar properties
+        # that are measureable in an image along with stars.
+        max_quasar_dist = 10000.0  # light years
+        min_quasar_dist = 100.0  # Assume we're not looking at anything close
+        # Luminosity relative to the sun. Also wildly inaccurate, but taken together
+        # with the close distance set above, should provide measureable values in the simulated image
+        min_luminosity = 0.5
+        max_luminosity = 5.0
+        luminosity_to_flux = lum_solar/(4.0*pi*(ly**2.0))
+        rand_gen = np.random
+        if seed is not None:
+            rand_gen.seed(seed)
+
+        redshift = rand_gen.uniform(redshift_min, redshift_max, size=n_quasar)
+        luminosity = rand_gen.uniform(min_luminosity, max_luminosity, size=n_quasar)
+        d_min = np.sqrt((rand_gen.uniform(min_quasar_dist, max_quasar_dist, size=n_quasar)**2.0 +
+                         rand_gen.uniform(min_quasar_dist, max_quasar_dist, size=n_quasar)**2.0))
+        distance_attenuation = (d_min + rand_gen.uniform(0, max_quasar_dist - min_quasar_dist, size=n_quasar))
+        star_radial_dist = np.sqrt((rand_gen.uniform(-sky_radius, sky_radius, size=n_quasar)**2.0 +
+                                    rand_gen.uniform(-sky_radius, sky_radius, size=n_quasar)**2.0)/2.0)
+        star_angle = rand_gen.uniform(0.0, 2.0*pi, size=n_quasar)
+        pseudo_x = x_center + star_radial_dist*np.cos(star_angle)/pixel_scale_degrees
+        pseudo_y = y_center + star_radial_dist*np.sin(star_angle)/pixel_scale_degrees
+
+        ra = []
+        dec = []
+        for _i in range(n_quasar):
+            ra_star, dec_star = wcs.pixelToSky(afwGeom.Point2D(pseudo_x[_i], pseudo_y[_i]))
+            ra.append(ra_star)
+            dec.append(dec_star)
+        flux = luminosity*luminosity_to_flux/distance_attenuation**2.0
+        self.raw_flux = flux
+        self.redshift = redshift
         self.ra = ra
         self.dec = dec
