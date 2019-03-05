@@ -161,7 +161,7 @@ def kernel_1d(locs, size):
     pi = np.pi
     pix = np.arange(size, dtype=np.float64)
     sign = np.power(-1.0, pix)
-    offset = np.floor(locs)
+    offset = np.floor(locs).astype(int)
     delta = locs - offset
     kernel = np.zeros((len(locs), size), dtype=np.float64)
     for i, loc in enumerate(locs):
