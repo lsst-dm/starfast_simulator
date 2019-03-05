@@ -196,7 +196,7 @@ class StarSim:
             else:
                 self.edge_dist = 5*psf.calculateFWHM()*fwhm_to_sigma/CoordsXY.scale()
 
-    def load_catalog(self, name=None, sed_list=None, n_star=None, seed=None, **kwargs):
+    def load_catalog(self, name=None, sed_list=None, n_star=None, seed=None, sky_radius=None, **kwargs):
         """Load or generate a catalog of stars to be used for the simulations."""
         """
         @param name: name of flux entry to use for catalg. Only important for external use of the catalog.
@@ -212,7 +212,8 @@ class StarSim:
         if self.edge_dist is not None:
             x_size_use += self.edge_dist
             y_size_use += self.edge_dist
-        sky_radius = np.sqrt(x_size_use**2.0 + y_size_use**2.0)*self.wcs.getPixelScale().asDegrees()
+        if sky_radius is None:
+            sky_radius = np.sqrt(x_size_use**2.0 + y_size_use**2.0)*self.wcs.getPixelScale().asDegrees()
         self.catalog = _cat_sim(sky_radius=sky_radius, wcs=self.wcs, _wcs_ref=self._wcs_ref,
                                 name=name, n_star=n_star, seed=seed, **kwargs)
         self.seed = seed
@@ -261,7 +262,7 @@ class StarSim:
         CoordsXY.set_x(xv)
         CoordsXY.set_y(yv)
 
-    def load_quasar_catalog(self, name=None, n_quasar=None, seed=None, **kwargs):
+    def load_quasar_catalog(self, name=None, n_quasar=None, seed=None, sky_radius=None, **kwargs):
         """Load or generate a catalog of stars to be used for the simulations."""
         """
         @param name: name of flux entry to use for catalg. Only important for external use of the catalog.
@@ -277,7 +278,8 @@ class StarSim:
         if self.edge_dist is not None:
             x_size_use += self.edge_dist
             y_size_use += self.edge_dist
-        sky_radius = np.sqrt(x_size_use**2.0 + y_size_use**2.0)*self.wcs.getPixelScale().asDegrees()
+        if sky_radius is None:
+            sky_radius = np.sqrt(x_size_use**2.0 + y_size_use**2.0)*self.wcs.getPixelScale().asDegrees()
         self.quasar_catalog = _quasar_sim(sky_radius=sky_radius, wcs=self.wcs, _wcs_ref=self._wcs_ref,
                                           name=name, n_quasar=n_quasar, seed=seed, **kwargs)
         self.seed = seed
@@ -467,7 +469,7 @@ class StarSim:
         else:
             bright_image = 0.0
         return_image = (source_image + bright_image) + self.background
-        variance = return_image[:, :]
+        variance = np.abs(return_image[:, :])
 
         if photon_noise > 0:
             rand_gen = np.random
