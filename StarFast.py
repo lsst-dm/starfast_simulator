@@ -55,7 +55,8 @@ import lsst.afw.geom as afwGeom
 import lsst.afw.image as afwImage
 from lsst.afw.coord import Observatory, Weather
 from lsst.afw.coord.refraction import differentialRefraction
-from lsst.afw.geom import Angle, degrees, arcseconds
+from lsst.geom import Angle, degrees, arcseconds
+import lsst.geom as geom
 import lsst.afw.math as afwMath
 import lsst.afw.table as afwTable
 from lsst.daf.base import DateTime
@@ -134,7 +135,7 @@ class StarSim:
                                x_size=x_size, y_size=y_size)
         self.quasar_coord = _CoordsXY(pixel_scale=self.photParams.platescale, pad_image=pad_image,
                                       x_size=x_size, y_size=y_size)
-        self.bbox = afwGeom.Box2I(afwGeom.Point2I(0, 0), afwGeom.ExtentI(x_size, y_size))
+        self.bbox = geom.Box2I(geom.Point2I(0, 0), geom.ExtentI(x_size, y_size))
         self.sky_rotation = sky_rotation
         if ra_reference is None:
             ra_reference = observatory.getLongitude()
@@ -608,8 +609,8 @@ class StarSim:
             darkTime=30.0,
             date=DateTime(mjd),
             ut1=mjd,
-            boresightRaDec=afwGeom.SpherePoint(ra, dec),
-            boresightAzAlt=afwGeom.SpherePoint(Angle(np.radians(azimuth)), Angle(np.radians(elevation))),
+            boresightRaDec=geom.SpherePoint(ra, dec),
+            boresightAzAlt=geom.SpherePoint(Angle(np.radians(azimuth)), Angle(np.radians(elevation))),
             boresightAirmass=airmass,
             boresightRotAngle=Angle(np.radians(boresightRotAngle)),
             observatory=self.observatory,
@@ -724,8 +725,8 @@ class _CoordsXY:
 
 def _create_wcs(bbox=None, pixel_scale=None, ra=None, dec=None, sky_rotation=None):
     """Create a wcs (coordinate system)."""
-    crval = afwGeom.SpherePoint(ra, dec)
-    crpix = afwGeom.Box2D(bbox).getCenter()
+    crval = geom.SpherePoint(ra, dec)
+    crpix = geom.Box2D(bbox).getCenter()
     cdMatrix = afwGeom.makeCdMatrix(scale=pixel_scale*arcseconds,
                                     orientation=Angle(sky_rotation),
                                     flipX=True)
@@ -806,7 +807,7 @@ def _cat_sim(seed=None, n_star=None, n_galaxy=None, sky_radius=None, name=None, 
     for _i in range(n_star):
         ra = star_properties.ra[_i]
         dec = star_properties.dec[_i]
-        source_test_centroid = wcs.skyToPixel(afwGeom.SpherePoint(ra, dec))
+        source_test_centroid = wcs.skyToPixel(geom.SpherePoint(ra, dec))
         source = catalog.addNew()
         source.set(fluxKey, star_properties.raw_flux[_i])
         source.set(centroidKey, source_test_centroid)
@@ -854,7 +855,7 @@ def _quasar_sim(seed=None, n_quasar=None, sky_radius=None, name=None, wcs=None,
     for _i in range(n_quasar):
         ra = quasar_properties.ra[_i]
         dec = quasar_properties.dec[_i]
-        source_test_centroid = wcs.skyToPixel(afwGeom.SpherePoint(ra, dec))
+        source_test_centroid = wcs.skyToPixel(geom.SpherePoint(ra, dec))
         source = catalog.addNew()
         source.set(fluxKey, quasar_properties.raw_flux[_i])
         source.set(centroidKey, source_test_centroid)
@@ -1244,7 +1245,7 @@ class _StellarDistribution:
             pseudo_y = y_center + star_radial_dist*np.sin(star_angle)/pixel_scale_degrees
 
             for _i in range(n_use):
-                ra_star, dec_star = wcs.pixelToSky(afwGeom.Point2D(pseudo_x[_i], pseudo_y[_i]))
+                ra_star, dec_star = wcs.pixelToSky(geom.Point2D(pseudo_x[_i], pseudo_y[_i]))
                 ra.append(ra_star)
                 dec.append(dec_star)
                 flux_use = next(luminosity_gen)*luminosity_to_flux/distance_attenuation[_i]**2.0
@@ -1317,7 +1318,7 @@ class _QuasarDistribution:
         ra = []
         dec = []
         for _i in range(n_quasar):
-            ra_star, dec_star = wcs.pixelToSky(afwGeom.Point2D(pseudo_x[_i], pseudo_y[_i]))
+            ra_star, dec_star = wcs.pixelToSky(geom.Point2D(pseudo_x[_i], pseudo_y[_i]))
             ra.append(ra_star)
             dec.append(dec_star)
         flux = luminosity*luminosity_to_flux/distance_attenuation**2.0
